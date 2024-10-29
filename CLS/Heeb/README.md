@@ -1,6 +1,6 @@
 # Model Performance Metrics, twitter dataset, pretrained on sampler version.
 
-| Model               | AUC    | TP    | FP    | FN    | TN     | F1      | Accuracy | (TN + FN) / Total best: 0.6629 | Precision | Recall | FPR     | TNR     | Runtime |
+| Model               | AUC    | TP    | FP    | FN    | TN     | F1      | Accuracy | (TN+FN)/Total best:0.6629 | Precision | Recall | FPR     | TNR     | Runtime |
 |---------------------|--------|-------|-------|-------|--------|---------|----------|-------------------|-----------|--------|---------|---------|---------|
 | SybilGAT_L2 | 0.8311 | 71817 | 82256 | 5250  | 69315  | 0.6214  | 0.6173               | 0.3261            | 0.4661    | 0.9319 | 0.5427  | 0.4573  | 12420   |
 | SybilGAT_L4 | 0.8464 | 71766 | 75360 | 5301  | 76211  | 0.6402  | 0.6472               | 0.3565            | 0.4878    | 0.9312 | 0.4972  | 0.5028  | 19476   |
