@@ -36,30 +36,18 @@
 
 ### Metrics
 
+### Metrics
+
 In classification tasks, we evaluate the model performance using **Precision**, **Recall**, and **F1-score**.
 
 - **Precision**: Measures the accuracy of positive predictions.
   
-  \[
-  \text{Precision} = \frac{\text{True Positives (TP)}}{\text{True Positives (TP)} + \text{False Positives (FP)}}
-  \]
+  Precision = TP / (TP + FP)
 
 - **Recall**: Measures the coverage of actual positives.
   
-  \[
-  \text{Recall} = \frac{\text{True Positives (TP)}}{\text{True Positives (TP)} + \text{False Negatives (FN)}}
-  \]
+  Recall = TP / (TP + FN)
 
-- **F1-Score**: The harmonic mean of Precision and Recall, providing a single metric that balances both.
+- **F1-Score**: The harmonic mean of Precision and Recall.
   
-  \[
-  \text{F1-Score} = 2 \cdot \frac{\text{Precision} \times \text{Recall}}{\text{Precision} + \text{Recall}}
-  \]
-
-### Definitions
-
-- **True Positives (TP)**: Correctly predicted positive samples.
-- **False Positives (FP)**: Incorrectly predicted positive samples.
-- **False Negatives (FN)**: Incorrectly predicted negative samples.
-
-Using these metrics, we can assess the model's effectiveness in identifying true positives while minimizing false positives and false negatives.
+  F1-Score = 2 * (Precision * Recall) / (Precision + Recall)
