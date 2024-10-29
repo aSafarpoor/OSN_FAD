@@ -31,3 +31,35 @@
 | Model_4            | 0.5000 | 19571 | 90220 | 58014 | 60890  | 0.2089  | 0.3518   | 0.6511        | 0.1783    | 0.2523 | 0.5970  | 0.4030  | 8510    |
 | Model_5            | 0.6015 | 0     | 0     | 77585 | 151110 | 0.0000  | 0.6607   | 1.0000        | inf       | 0.0000 | 0.0000  | 1.0000  | 2080    |
 | Model_6            | 0.6015 | 0     | 0     | 77585 | 151110 | 0.0000  | 0.6607   | 1.0000        | inf       | 0.0000 | 0.0000  | 1.0000  | 732     |
+
+
+
+### Metrics
+
+In classification tasks, we evaluate the model performance using **Precision**, **Recall**, and **F1-score**.
+
+- **Precision**: Measures the accuracy of positive predictions.
+  
+  \[
+  \text{Precision} = \frac{\text{True Positives (TP)}}{\text{True Positives (TP)} + \text{False Positives (FP)}}
+  \]
+
+- **Recall**: Measures the coverage of actual positives.
+  
+  \[
+  \text{Recall} = \frac{\text{True Positives (TP)}}{\text{True Positives (TP)} + \text{False Negatives (FN)}}
+  \]
+
+- **F1-Score**: The harmonic mean of Precision and Recall, providing a single metric that balances both.
+  
+  \[
+  \text{F1-Score} = 2 \cdot \frac{\text{Precision} \times \text{Recall}}{\text{Precision} + \text{Recall}}
+  \]
+
+### Definitions
+
+- **True Positives (TP)**: Correctly predicted positive samples.
+- **False Positives (FP)**: Incorrectly predicted positive samples.
+- **False Negatives (FN)**: Incorrectly predicted negative samples.
+
+Using these metrics, we can assess the model's effectiveness in identifying true positives while minimizing false positives and false negatives.
