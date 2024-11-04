@@ -4,10 +4,36 @@ from benchmark import *
 import seaborn as sns
 from samplers import *
 import os
+import copy
+from collections import deque
+
+import pickle
 
 
+
+    
 RUN = True
 PLOT = True
+
+
+def bfs_first_k_nodes(graph, root, k):
+    visited = set()  # Keep track of visited nodes
+    queue = deque([root])  # Initialize the BFS queue with the root node
+    result = []  # To store the first k nodes
+    
+    while queue and len(result) < k:
+        node = queue.popleft()
+        
+        if node not in visited:
+            visited.add(node)
+            result.append(node)
+            
+            # Add neighbors to the queue if they haven't been visited
+            for neighbor in graph.neighbors(node):
+                if neighbor not in visited:
+                    queue.append(neighbor)
+    print("BFS done, len(targets) = ",len(result))            
+    return result 
 
 class Experiment:
     def __init__(self, num_experiments: int, subdirectory: str, active: bool = True):
@@ -20,7 +46,9 @@ class Experiment:
         self.readme = None
         self.active = active
 
-        self.statistics = ["AUC", "accuracy", "F1"]
+        # self.statistics = ["AUC", "accuracy", "F1"]
+        self.statistics = ["AUC"]#, "accuracy", "F1"]
+        
         self.seeds = list(range(42, 42 + num_experiments))
         self.data = None
 
@@ -54,7 +82,6 @@ class Experiment:
         df.to_csv(f"{self.directory}/{file_name}", sep=" ", index=False)
 
     def _full_pretrain_algorithm_list(self):
-        print("ZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZ")
         return [
             SybilFinderGAT(num_epochs=1000,
                            num_layers=2,
@@ -102,14 +129,15 @@ class PretrainOnSubgraphExperiment(Experiment):
             SybilBelief(),
             SybilSCAR()
         ]
+        
+        self.SEED = 1
 
     def _run_experiment(self):
-        print("hii")
         data = []
         attack_edges_type, social_network_type = None, None
 
         total_num_experiments = len(self.experiment_variants) * self.num_experiments
-        p_bar = tqdm(total=total_num_experiments)
+        
         for variant in self.experiment_variants:
             experiment_data = np.zeros(shape=(len(self.pretrain_algorithms[variant]) + len(self.baseline_algorithms),
                                               len(self.statistics), self.num_experiments))
@@ -130,84 +158,204 @@ class PretrainOnSubgraphExperiment(Experiment):
                 if variant == "twitter":
                     # Social network was already loaded
                     social_network_type = "Twitter"
-                elif variant == "facebook-random" or variant == "facebook-targeted":
-                    social_network = SocialNetworkFromRegions(honest_region=FacebookSNAP(),
-                                                              sybil_region=FacebookSNAP(is_sybil=True))
-                    number_of_nodes = social_network.network.num_nodes() // 10
-                    attack_edges_per_sybil = 20
-                    social_network_type = "Facebook"
-                elif variant == "synthetic-L-random" or variant == "synthetic-L-targeted":
-                    social_network = SocialNetworkFromRegions(honest_region=PowerLawGraph(25000, 5, 0.8),
-                                                              sybil_region=PowerLawGraph(25000, 5, 0.8, is_sybil=True))
-                    number_of_nodes = social_network.network.num_nodes() // 10
-                    attack_edges_per_sybil = 8
-                    social_network_type = "PowerLaw-Large"
-                elif variant == "synthetic-S-random" or variant == "synthetic-S-targeted":
-                    social_network = SocialNetworkFromRegions(honest_region=PowerLawGraph(5000, 5, 0.8),
-                                                              sybil_region=PowerLawGraph(5000, 5, 0.8, is_sybil=True))
-                    number_of_nodes = social_network.network.num_nodes() // 10
-                    attack_edges_per_sybil = 8
-                    social_network_type = "PowerLaw-Small"
-                else:
-                    raise Exception(f"Invalid experiment variant: {variant}")
+                # elif variant == "facebook-random" or variant == "facebook-targeted":
+                #     social_network = SocialNetworkFromRegions(honest_region=FacebookSNAP(),
+                #                                               sybil_region=FacebookSNAP(is_sybil=True))
+                #     number_of_nodes = social_network.network.num_nodes() // 10
+                #     attack_edges_per_sybil = 20
+                #     social_network_type = "Facebook"
+                # elif variant == "synthetic-L-random" or variant == "synthetic-L-targeted":
+                #     social_network = SocialNetworkFromRegions(honest_region=PowerLawGraph(25000, 5, 0.8),
+                #                                               sybil_region=PowerLawGraph(25000, 5, 0.8, is_sybil=True))
+                #     number_of_nodes = social_network.network.num_nodes() // 10
+                #     attack_edges_per_sybil = 8
+                #     social_network_type = "PowerLaw-Large"
+                # elif variant == "synthetic-S-random" or variant == "synthetic-S-targeted":
+                #     social_network = SocialNetworkFromRegions(honest_region=PowerLawGraph(5000, 5, 0.8),
+                #                                               sybil_region=PowerLawGraph(5000, 5, 0.8, is_sybil=True))
+                #     number_of_nodes = social_network.network.num_nodes() // 10
+                #     attack_edges_per_sybil = 8
+                #     social_network_type = "PowerLaw-Small"
+                # else:
+                #     raise Exception(f"Invalid experiment variant: {variant}")
 
-                if "twitter" not in variant:
-                    # Create train / test split (it is already done for Twitter dataset)
-                    social_network.train_test_split(train_fraction=0.05)
+                # if "twitter" not in variant:
+                #     # Create train / test split (it is already done for Twitter dataset)
+                #     social_network.train_test_split(train_fraction=0.05)
 
-                    # Set up attack
-                    if "targeted" in variant:
-                        attack = Attack(p_targeted=0.1, pdf_targeted=[0.25, 0.25, 0.5], seed=self.seeds[i])
-                        attack_edges_type = "targeted"
-                    else:
-                        attack = RandomAttack(seed=self.seeds[i])
-                        attack_edges_type = "random"
-                    print(3121321)
-                    attack.perform_attack(social_network=social_network,
-                                          num_attack_edges=attack_edges_per_sybil * social_network.sybil_region.num_nodes(),
-                                          honest_targets=social_network.train_honest_nodes,
-                                          sybil_targets=social_network.train_sybil_nodes)
-                print(5423)
+                #     # Set up attack
+                #     if "targeted" in variant:
+                #         attack = Attack(p_targeted=0.1, pdf_targeted=[0.25, 0.25, 0.5], seed=self.seeds[i])
+                #         attack_edges_type = "targeted"
+                #     else:
+                #         attack = RandomAttack(seed=self.seeds[i])
+                #         attack_edges_type = "random"
+                #     print("BAD")
+                #     attack.perform_attack(social_network=social_network,
+                #                           num_attack_edges=attack_edges_per_sybil * social_network.sybil_region.num_nodes(),
+                #                           honest_targets=social_network.train_honest_nodes,
+                #                           sybil_targets=social_network.train_sybil_nodes)
+                
                 # Network sampling
+                
+                '''
                 subsampled_social_network, remaining_social_network = ForestFireSampler(
                     seed=self.seeds[i]).sample_social_network(
                     social_network=social_network,
                     number_of_nodes=number_of_nodes,
                     num_sources=1,
                     verbose=False)
+                
+                   
+                with open('subsampled_social_network.pickle', 'wb') as handle:
+                    pickle.dump(subsampled_social_network, handle)
+
+                with open('remaining_social_network.pickle', 'wb') as handle:
+                    pickle.dump(remaining_social_network, handle)
+                    
+                '''
+                    
+                with open('subsampled_social_network.pickle', 'rb') as handle:
+                    subsampled_social_network = pickle.load(handle)
+                
+                with open('remaining_social_network.pickle', 'rb') as handle:
+                    remaining_social_network = pickle.load(handle)
+                
+            
                 print("forrest done")
+                
                 for pretrain_algorithm in self.pretrain_algorithms[variant]:
                     # Put algorithm into training mode
                     pretrain_algorithm.train_model = True
 
+                
                 # Pretraining
+                
                 pretrain_evaluator = Evaluator(social_network=subsampled_social_network, verbose=False)
                 pretrain_evaluator.evaluate_all(algorithms=self.pretrain_algorithms[variant])
+                
+                    
                 # pretrain_evaluator.get_all_stats()
-                print("here done")
+                print("train done")
+                
+                
                 for pretrain_algorithm in self.pretrain_algorithms[variant]:
                     # Do not fine-tune, directly apply to remaining social network
                     pretrain_algorithm.train_model = False
-                print("here 2 done")
-                # Evaluation
-                evaluator = Evaluator(social_network=remaining_social_network, verbose=False)
+                
+                
+                
+                # Evaluation for Targets
+                ##################################################################
+                copy_remaining = copy.deepcopy(remaining_social_network)
+                sybils = copy_remaining.test_sybil_nodes
+                
+                random.seed(self.SEED+1)
+                targets_root = random.sample(sybils, 1)[0]
+                bfsgraph = copy_remaining.network.graph
+                targets = bfs_first_k_nodes(bfsgraph, targets_root, k = 100)
+                copy_remaining.targets = targets
+                
+                print("#targets = ",len(targets))
+                print("#new_test_sybil_nodes2 = ",len(sybils))
+                
+                print("all edges: ", copy_remaining.network.graph.number_of_edges())
+                targets = copy_remaining.targets
+                targets_set = set(targets)
+                edges = list(copy_remaining.network.graph.edges())
+                list_of_edges_between_targets = [[min(x,y),max(x,y)] for [x,y] in tqdm(edges) if x in targets_set and y in targets_set]
+                print("list_of_edges_between_targets = ",len(list_of_edges_between_targets))
+                add_budget = 100
+                remove_budget = 100
+                print("add_budget    = ",add_budget)
+                print("remove_budget = ",remove_budget)
+                
+                
+                s = 0
+                for ii in targets:
+                    s+= len(list(copy_remaining.network.graph.neighbors(ii)))
+                print("all edges  counter: ",s)
+                
+                has_b_neig = []
+                B = set(copy_remaining.test_honest_nodes)
+                common_counts = []
+                
+                for x in copy_remaining.test_sybil_nodes:
+                    A = copy_remaining.network.graph.neighbors(x)
+                    # Calculate the number of common elements for each list in `lists`
+                    common_count = len(set(A) & B)
+                    common_counts.append((common_count, x))
+                common_counts.sort(reverse=True, key=lambda x: x[0])
+                top_k_indices = [x for _, x in common_counts[:add_budget]]
+                
+                c = 0
+                new_edges = []
+                while c<add_budget:
+                    x = random.sample(targets, 1)[0]
+                    
+                    y = top_k_indices[c]
+                    
+                    new_edges.append([x,y])
+                    c+=1
+                
+                
+                    
+                # remove edge from target to anything
+                c = 0
+                c_success = 0 
+                
+                while c<min(remove_budget,s):
+                    x = random.sample(targets,1)[0]
+                    neigs = copy_remaining.network.graph.neighbors(x)
+                    ys = [z for z in list(neigs) if z in copy_remaining.test_sybil_nodes]
+                    if len(ys)<=0:
+                        c += 0.1
+                        continue
+                        
+                    
+                        has_b_neig.append(x)
+                    y = random.sample(ys,1)[0]
+                    c_success += 1
+                    copy_remaining.network.graph.remove_edges_from([[x,y]])
+                    c+=1
+                    
+                # copy_remaining.network.graph.remove_edges_from(remove_list)
+                copy_remaining.network.graph.add_edges_from(new_edges)
+                copy_remaining.set_network(copy_remaining.network)
+                print("graph editted :: ADVERSARY")
+                   
+                evaluator = Evaluator(social_network=copy_remaining, verbose=False)
                 evaluator.evaluate_all(algorithms=self.pretrain_algorithms[variant] + self.baseline_algorithms,
                                        reinitialize_GNNs=False)
                 
-                print("evalu done")
-                all_stats = evaluator.get_all_stats()
+                all_stats = evaluator.get_all_stats_for_targets() # changed by Ali                
                 for algo_id, algo in enumerate(self.pretrain_algorithms[variant] + self.baseline_algorithms):
-                    print("\n\n==========================================")
+                    print("\n\n==================Target========================")
                     print("                                  ",algo)
-                    print(all_stats,all_stats[algo_id])
+                    print(all_stats[algo_id])
                     for stat_id, stat in enumerate(self.statistics):
-                        print(stat,self.statistics)
-                        
+                        print(stat,self.statistics)           
                         experiment_data[algo_id, stat_id, i] = all_stats[algo_id][stat]
                     print("==========================================\n\n")
-                # Progress bar
-                p_bar.update(n=1)
-                p_bar.refresh()
+                ##################################################################################### 
+                
+                
+                ## to run simple version this avaluator is suitable (next line)
+                evaluator = Evaluator(social_network=remaining_social_network, verbose=False)
+                evaluator.evaluate_all(algorithms=self.pretrain_algorithms[variant] + self.baseline_algorithms,
+                                       reinitialize_GNNs=False)
+                all_stats = evaluator.get_all_stats() # changed by Ali
+                for algo_id, algo in enumerate(self.pretrain_algorithms[variant] + self.baseline_algorithms):
+                    print("\n\n=====================Total=====================")
+                    print("                                  ",algo)
+                    print(all_stats[algo_id])
+                    for stat_id, stat in enumerate(self.statistics):
+                        print(stat,self.statistics)           
+                        experiment_data[algo_id, stat_id, i] = all_stats[algo_id][stat]
+                    print("==========================================\n\n")   
+                    
+            
+            print("\n\nevalu done\n\n")       
 
             # Mean over experiments
             experiment_mean = np.mean(experiment_data, axis=2)
@@ -703,8 +851,8 @@ if __name__ == "__main__":
         #                              num_experiments=NUM_EXPERIMENTS, active=True)  # DONE EVALUATTING
       
     ]
-
-    # print(experiments)
+    
+    
     for experiment in experiments:
         
         if experiment.active:

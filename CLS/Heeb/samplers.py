@@ -5,9 +5,11 @@ import math
 import littleballoffur as lbof
 
 
+
 class Sampler:
     def __init__(self):
-        pass
+        self.SEED = 1
+        
 
     def sample_graph(self, graph: Graph, sources: [int], number_of_nodes: int,
                      allow_more_nodes_to_round: bool = False,
@@ -33,6 +35,7 @@ class Sampler:
         else:
             raise Exception("Unknown source split")
 
+        random.seed(self.SEED) # By Ali
         sources_honest = random.sample(original_social_network.honest_nodes, k_h)
         sources_sybil = random.sample(original_social_network.sybil_nodes, k_s)
 
@@ -42,6 +45,8 @@ class Sampler:
                                                      verbose=verbose)
         if verbose:
             print(f"Actual sampling process complete")
+            
+        random.seed(self.SEED) # By Ali
         sampled_nodes = subsampled_network_graph.nodes_list()
         new_train_honest_nodes1 = set(sampled_nodes).intersection(original_social_network.train_honest_nodes)
         new_train_sybil_nodes1 = set(sampled_nodes).intersection(original_social_network.train_sybil_nodes)
@@ -62,12 +67,20 @@ class Sampler:
         new_train_sybil_nodes2 = set(non_sampled_nodes).intersection(original_social_network.train_sybil_nodes)
         new_test_honest_nodes2 = set(non_sampled_nodes).intersection(original_social_network.test_honest_nodes)
         new_test_sybil_nodes2 = set(non_sampled_nodes).intersection(original_social_network.test_sybil_nodes)
+
+        
+        
+
+        
         remaining_social_network = SocialNetworkFromTrainTestSets(
             network=remaining_network_graph,
             train_honest_nodes=list(new_train_honest_nodes2),
             train_sybil_nodes=list(new_train_sybil_nodes2),
             test_honest_nodes=list(new_test_honest_nodes2),
             test_sybil_nodes=list(new_test_sybil_nodes2))
+        
+        remaining_social_network.targets=[]
+        
         if verbose:
             print(f"Remaining social network created")
 

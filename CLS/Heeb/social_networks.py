@@ -34,6 +34,7 @@ class SocialNetwork:
         self.test_sybil_nodes = None
         # self.train_honest_nodes, self.train_sybil_nodes, self.test_honest_nodes, self.test_sybil_nodes = self.train_test_split()
 
+        self.targets = [] # by Ali
         self.name = name
 
     def __str__(self):

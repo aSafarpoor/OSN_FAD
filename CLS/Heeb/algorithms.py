@@ -97,7 +97,7 @@ class SybilFinder:
                 self.train_labels[i] = 1
             self.num_sybil_nodes = len(sybil_nodes)
 
-    def find_sybils(self) -> list[int]:
+    def find_sybils(self,algo_name) -> list[int]:
         if self.verbose:
             print(f"\nRunning {self.__str__()} ...")
             print(f"Graph: {self.graph}")
@@ -105,15 +105,16 @@ class SybilFinder:
             unique, counts = np.unique(self.train_labels, return_counts=True)
             print(f"Train labels: {dict(zip(unique, counts))}")
 
+    
         start_time = time.time()
-        predicted_sybils = self._find_sybils()
+        predicted_sybils = self._find_sybils(algo_name = algo_name)
         end_time = time.time()
         self.runtime = round((end_time - start_time) * 1000)  # in ms
 
         return predicted_sybils
 
-    def _find_sybils(self) -> list[int]:
-        raise NotImplementedError("This method must be implemented by the subclass")
+    # def _find_sybils(self) -> list[int]:
+    #     raise NotImplementedError("This method must be implemented by the subclass")
 
     def sybil_classification(self, values, threshold: float, flip: bool = False) -> list[int]:
 
@@ -147,7 +148,8 @@ class SybilFinderRandom(SybilFinder):
 
         self.name = "SybilFinderRandom"
 
-    def _find_sybils(self) -> list[int]:
+    def _find_sybils(self,algo_name="") -> list[int]:
+        print(32132132)
         n = self.graph.num_nodes()
         values = np.random.uniform(0, 1, n)
 
@@ -223,7 +225,7 @@ class LegacyAlgorithm(SybilFinder):
                             "-nt", "1"]
         return process_list
 
-    def _find_sybils(self) -> list[int]:
+    def _find_sybils(self,algo_name="") -> list[int]:
 
         process_list = self.get_process_list()
 
@@ -298,7 +300,7 @@ class SybilRank(SybilFinder):
         super().set_graph(graph)
         self.max_iter = int(math.ceil(math.log2(self.graph.num_nodes())) * self.num_iterations_multiplier)
 
-    def _find_sybils(self) -> list[int]:
+    def _find_sybils(self,algo_name="") -> list[int]:
         if self.max_iter is None:
             raise Exception("Max iterations not set")
 
@@ -408,7 +410,7 @@ class SybilBelief(SybilFinder):
     def _description(self):
         return f"iterations = {self.max_iter}"
 
-    def _find_sybils(self) -> list[int]:
+    def _find_sybils(self,algo_name="") -> list[int]:
 
         if self.h is None or True:  # TODO check again
             self.h = {node: 0 for node in range(self.graph.num_nodes())}
@@ -500,7 +502,7 @@ class SybilSCAR(SybilFinder):
     def _description(self):
         return f"Number of iterations: {self.max_iter}"
 
-    def _find_sybils(self) -> list[int]:
+    def _find_sybils(self,algo_name="") -> list[int]:
         if self.variant == "C" and self.const_homophily_strength is None:
             # Default value suggested by paper (depends on graph)
             self.const_homophily_strength = 1.0 / (2.0 * self.graph.average_degree())  # TODO Check again in paper

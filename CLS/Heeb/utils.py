@@ -60,7 +60,11 @@ def relabel_graph_list_and_node_lists(graph_file_name: str,
 
 
 def mask_from_lists(nodes_lists: [[int]], labels: [int], no_label: int):
-    max_idx = max(max(node_list) for node_list in nodes_lists)
+    try:
+        max_idx = max(max(node_list) for node_list in nodes_lists)
+    except:
+        max_idx = max(max(node_list) for node_list in nodes_lists[1:]) # by Ali, for managing targets
+        
     mask = np.full(max_idx + 1, no_label)
     for i in range(len(nodes_lists)):
         node_list = nodes_lists[i]

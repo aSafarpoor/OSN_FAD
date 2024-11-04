@@ -16,6 +16,8 @@ import torch.nn.functional as F
 from sklearn.model_selection import train_test_split
 from sklearn import metrics
 
+from tqdm import tqdm
+import pickle
 
 # SEED = 1234
 
@@ -134,19 +136,24 @@ class SybilGNN(SybilFinder):
         return train_mask, val_mask, test_mask
 
     def _setup_pyg_graph(self):
+        
         if self.verbose:
             print("Setting up pyg_graph.x")
+ 
         if self.input_width == 1:
+            
             x_values = torch.full(size=(self.pyg_graph.num_nodes, 1), fill_value=0.0, dtype=torch.float32,
                                   device=self.device)
-
             for i in range(self.graph.num_nodes()):
                 if self.uses_honest_nodes:
                     if self.train_labels[i] == -1:
                         x_values[i] = -1.0
                 if self.uses_sybil_nodes:
                     if self.train_labels[i] == 1:
-                        x_values[i] = 1.0
+                        x_values[i] = 1.0                   
+       
+        
+        
         elif self.input_width == 2:
             x_values = torch.full(size=(self.pyg_graph.num_nodes, 2), fill_value=0.0, dtype=torch.float32,
                                   device=self.device)
@@ -267,7 +274,7 @@ class SybilGNN(SybilFinder):
         elif isinstance(self.model, GCN) or isinstance(self.model, GAT):
             out, h = self.model(self.pyg_graph.x, self.pyg_graph.edge_index)
         else:
-            raise Exception("Unknown model")
+            raise Exception("Unknown model")    
         return out, h
 
     def train(self):
@@ -275,6 +282,7 @@ class SybilGNN(SybilFinder):
         self.optimizer.zero_grad()
         out, h = self.apply_model(training_mode=True)
         loss = self.criterion(out[self.pyg_graph.train_mask], self.pyg_graph.y[self.pyg_graph.train_mask].type_as(out))
+        
         loss.backward()
         self.optimizer.step()
         return out, loss.item()
@@ -303,8 +311,10 @@ class SybilGNN(SybilFinder):
             y_pred = out[:, 0].detach().cpu().numpy()
         return y_pred
 
-    def _find_sybils(self) -> list[int]:
+    def _find_sybils(self,algo_name="") -> list[int]:
 
+        print("GNN _find_sybils started")
+        
         self._setup_pyg_graph()
 
         if self.model is None:
@@ -327,48 +337,63 @@ class SybilGNN(SybilFinder):
         epochs_without_improvement = 0
         out = None
         saved_model = None
+        
+        train_again = False 
         if self.train_model and self.num_epochs > 0:
-            for epoch in range(self.num_epochs):
-                out, loss = self.train()
+            if train_again == False:
+                with open(algo_name+'self_model.pickle', 'rb') as handle:
+                    self.model = pickle.load(handle)
+            else:     
+                for epoch in tqdm(range(self.num_epochs)):
+                    
+                    out, loss = self.train()
 
-                val_loss, val_accuracy, val_AUC = self.test(self.pyg_graph.val_mask)
+                    val_loss, val_accuracy, val_AUC = self.test(self.pyg_graph.val_mask)
 
-                if val_loss < best_val_loss:
-                    best_val_loss = val_loss
-                    epochs_without_improvement = 0
-                    # if self.verbose:
-                    #    print(f"New best score, saving model")
-                    # torch.save(self.model.state_dict(), 'models/temp/best_model.pth')
-                    saved_model = copy.deepcopy(self.model)
-                else:
-                    epochs_without_improvement += 1
+                    if val_loss < best_val_loss:
+                        best_val_loss = val_loss
+                        epochs_without_improvement = 0
+                        # if self.verbose:
+                        #    print(f"New best score, saving model")
+                        # torch.save(self.model.state_dict(), 'models/temp/best_model.pth')
+                        saved_model = copy.deepcopy(self.model)
+                    else:
+                        epochs_without_improvement += 1
 
-                if epochs_without_improvement >= self.patience:
-                    if self.verbose:
-                        print(f"Lost patience after {epoch} epochs, loading best model")
-                    # self.model.load_state_dict(torch.load('models/temp/best_model.pth'))
-                    self.model = saved_model
-                    out, _ = self.apply_model(training_mode=False)
-                    break
+                    if epochs_without_improvement >= self.patience:
+                        if self.verbose:
+                            print(f"Lost patience after {epoch} epochs, loading best model")
+                        # self.model.load_state_dict(torch.load('models/temp/best_model.pth'))
+                        self.model = saved_model
+                        out, _ = self.apply_model(training_mode=False)
+                        break
 
-                train_loss, train_accuracy, train_AUC = self.test(self.pyg_graph.train_mask)
+                    train_loss, train_accuracy, train_AUC = self.test(self.pyg_graph.train_mask)
 
-                train_losses.append(train_loss)
-                train_accs.append(train_accuracy)
-                train_AUCs.append(train_AUC)
-                val_losses.append(val_loss)
-                val_accs.append(val_accuracy)
-                val_AUCs.append(val_AUC)
+                    train_losses.append(train_loss)
+                    train_accs.append(train_accuracy)
+                    train_AUCs.append(train_AUC)
+                    val_losses.append(val_loss)
+                    val_accs.append(val_accuracy)
+                    val_AUCs.append(val_AUC)
 
-                if self.verbose and (epoch % 10 == 0 or epoch == self.num_epochs - 1):
-                    print(
-                        f"epoch = {epoch:03d}:\tloss = {loss:8f},\tval_loss = {val_loss:8f},\t val_accuracy = {val_accuracy:8f},\t val_AUC = {val_AUC:8f},\tepochs_without_improvement = {epochs_without_improvement}")
+                    if self.verbose and (epoch % 10 == 0 or epoch == self.num_epochs - 1):
+                        print(
+                            f"epoch = {epoch:03d}:\tloss = {loss:8f},\tval_loss = {val_loss:8f},\t val_accuracy = {val_accuracy:8f},\t val_AUC = {val_AUC:8f},\tepochs_without_improvement = {epochs_without_improvement}")
+                        
+                with open(algo_name+'self_model.pickle', 'wb') as handle:
+                    pickle.dump(self.model, handle)
+
         else:
             out, _ = self.apply_model(training_mode=False)
 
-        self.train_losses = train_losses
-        self.val_losses = val_losses
+        if train_again:
+            self.train_losses = train_losses
+            self.val_losses = val_losses
 
+        else:
+            out, _ = self.apply_model(training_mode=False)
+            
         y_pred = self.get_predictions(out)
 
         self.trust_values = -y_pred
