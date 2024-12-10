@@ -257,6 +257,34 @@ with open('HG.pickle', 'wb') as handle:
 '''
 with open('HG.pickle', 'rb') as handle:
     HG = pickle.load(handle)
+
+def update_heterogeneous_graph(HG, node_mapping):
+    # Create a new graph to hold updated nodes
+    updated_HG = nx.Graph() if isinstance(HG, nx.Graph) else nx.DiGraph()
+
+    # Update nodes and their attributes
+    for node, data in tqdm(HG.nodes(data=True)):
+        new_node = node_mapping[node]
+        updated_HG.add_node(new_node, **data)  # Copy node attributes to the new graph
+
+    # Add edges with the new node identifiers
+    for u, v, data in tqdm(HG.edges(data=True)):
+        updated_HG.add_edge(node_mapping[u], node_mapping[v], **data)
+
+    return updated_HG
+
+node_mapping = {node: idx for idx, node in tqdm(enumerate(HG.nodes))}
+HG = update_heterogeneous_graph(HG, node_mapping)
+
+with open('HG.pickle', 'wb') as handle:
+    pickle.dump(HG, handle)
+
+'''
+
+'''
+
+with open('HG.pickle', 'rb') as handle:
+    HG = pickle.load(handle)
     
     
 
@@ -268,7 +296,6 @@ from torch_geometric.data import HeteroData
 # 'user', 'keyword', 'tweet'
 # 'follow', 'haskeyword', 'keywordintweet', 'hastweet', 'tweetedby'
 
-node_mapping = {node: idx for idx, node in tqdm(enumerate(HG.nodes))}
 
 # Initialize HeteroData object
 data = HeteroData()
@@ -302,152 +329,221 @@ for source, target, attributes in HG.edges(data=True):
     edge_type = attributes['edge_type']
     src_type = HG.nodes[source]['node_type']
     tgt_type = HG.nodes[target]['node_type']
+
+    # Initialize the edge_index for this edge type if it doesn't exist
     if (src_type, edge_type, tgt_type) not in data.edge_types:
-        data[(src_type, edge_type, tgt_type)].edge_index = [[], []]
-    data[(src_type, edge_type, tgt_type)].edge_index[0].append(node_mapping[source])
-    data[(src_type, edge_type, tgt_type)].edge_index[1].append(node_mapping[target])
+        data[(src_type, edge_type, tgt_type)].edge_index = torch.empty((2, 0), dtype=torch.long)
 
-# Convert edge indices to tensors
-for edge_type in data.edge_types:
-    edge_data = data[edge_type]
-    edge_data.edge_index = torch.tensor(edge_data.edge_index, dtype=torch.long).T
+    # Append the edge indices to the existing tensor
+    current_edges = data[(src_type, edge_type, tgt_type)].edge_index
+    new_edges = torch.tensor([[source], [target]], dtype=torch.long)
+    data[(src_type, edge_type, tgt_type)].edge_index = torch.cat([current_edges, new_edges], dim=1)
 
-# The HeteroData object is now populated with embeddings
+# The HeteroData object is now populated with tensors
 print(data)
+
+# Verify the types of edge_index
+# print(type(data['user', 'follow', 'user'].edge_index))  # Should be torch.Tensor
+# print(type(data['user', 'follow', 'user'].edge_index[0]))
+
 
 with open('data.pickle', 'wb') as handle:
     pickle.dump(data, handle)
 
 
 '''
+
+
+
 with open('data.pickle', 'rb') as handle:
     data = pickle.load(handle)
     
+print(data)
+# user_node_data = data['user']
+
 import torch
 import torch.nn.functional as F
-from torch_geometric.nn import GATConv, HeteroConv
+from torch_geometric.nn import HeteroConv, GATConv, Linear
+from sklearn.model_selection import train_test_split
 
-# Define a HeteroGAT model for node classification
-class HeteroGAT(torch.nn.Module):
-    def __init__(self, metadata, hidden_dim, out_dim):
+
+class HeteroGNNWithTypes(torch.nn.Module):
+    def __init__(self, metadata, in_channels, hidden_channels, out_channels, num_edge_types, num_node_types, heads=1):
         super().__init__()
-        # Heterogeneous convolution layer
-        self.conv1 = HeteroConv(
-            {
-                edge_type: GATConv((-1, -1), hidden_dim, add_self_loops=False)
-                for edge_type in metadata[1]  # metadata[1] contains edge types
-            },
-            aggr='mean',  # Aggregate messages
-        )
-        self.conv2 = HeteroConv(
-            {
-                edge_type: GATConv((-1, -1), out_dim, add_self_loops=False)
-                for edge_type in metadata[1]
-            },
-            aggr='mean',
-        )
+        self.metadata = metadata
 
-    def forward(self, x_dict, edge_index_dict):
-        # First layer
-        x_dict = self.conv1(x_dict, edge_index_dict)
-        x_dict = {key: F.relu(x) for key, x in x_dict.items()}  # Activation
+        # Initialize the GNN layers for edge types
+        self.conv1 = HeteroConv({
+            edge_type: GATConv(
+                in_channels=in_channels,
+                out_channels=hidden_channels,
+                heads=heads,
+                add_self_loops = False
+            )
+            for edge_type in metadata[1]
+        }, aggr='mean')  # Aggregate results across edge types
 
-        # Second layer
-        x_dict = self.conv2(x_dict, edge_index_dict)
-        return x_dict
+        self.conv2 = HeteroConv({
+            edge_type: GATConv(
+                in_channels=hidden_channels * heads,
+                out_channels=hidden_channels,
+                heads=heads,
+                add_self_loops = False
+            )
+            for edge_type in metadata[1]
+        }, aggr='mean')
+
+        # Final classifier for node types
+        self.classifiers = torch.nn.ModuleDict({
+            node_type: Linear(hidden_channels * heads, out_channels)
+            for node_type in metadata[0]
+        })
+
+        # Embeddings for node and edge types
+        self.node_type_embed = torch.nn.Embedding(num_node_types, in_channels)
+        self.edge_type_embed = torch.nn.Embedding(num_edge_types, hidden_channels)
+
+    def forward(self, data):
+        x_dict, edge_index_dict = {}, {}
+
+        # Prepare x_dict and add node type embeddings
+        for node_type in data.node_types:
+            x_dict[node_type] = data[node_type].x
+            node_type_ids = torch.full((x_dict[node_type].size(0),), list(data.node_types).index(node_type), dtype=torch.long)
+            x_dict[node_type] += self.node_type_embed(node_type_ids)
+
+        # Prepare edge_index_dict without self-loops
+        for edge_type in data.edge_types:
+            edge_index = data[edge_type].edge_index
+            edge_index_dict[edge_type] = edge_index  # Use edge_index as-is without adding self-loops
+
+
+
+        node_offsets = {}
+        current_offset = 0
+        for node_type in metadata[0]:
+            node_offsets[node_type] = current_offset
+            current_offset += data[node_type]['x'].size(0)
+
+        # Adjust edge indices
+        adjusted_edge_index_dict = {}
+        for edge_type in data.edge_types:
+            src_type, _, tgt_type = edge_type
+            edge_index = data[edge_type]['edge_index']
+
+            # Adjust indices for source and target nodes
+            adjusted_edge_index = edge_index.clone()  # Copy the original edge_index
+            adjusted_edge_index[0] -= node_offsets[src_type]  # Adjust source node indices
+            adjusted_edge_index[1] -= node_offsets[tgt_type]  # Adjust target node indices
+
+            # Store the adjusted edge index
+            adjusted_edge_index_dict[edge_type] = adjusted_edge_index
+
+
+        # Pass through first HeteroConv layer
+        x_dict = self.conv1(x_dict, adjusted_edge_index_dict)
+        x_dict = {key: F.elu(x) for key, x in x_dict.items()}
+
+        # Pass through second HeteroConv layer
+        x_dict = self.conv2(x_dict, adjusted_edge_index_dict)
+        x_dict = {key: F.elu(x) for key, x in x_dict.items()}
+
+        # Apply classifiers for each node type
+        out_dict = {}
+        for node_type, x in x_dict.items():
+            out_dict[node_type] = F.softmax(self.classifiers[node_type](x), dim=1)
+
+        return out_dict
+
+
+# Metadata for the heterogeneous graph
+metadata = (
+    ['user', 'keyword', 'tweet'],  # Node types
+    [('user', 'follow', 'user'), ('user', 'hastweet', 'tweet'), ('tweet', 'tweetedby', 'user'), ('keyword', 'keywordintweet', 'tweet'), ('tweet', 'haskeyword', 'keyword') ]  # Edge types
+)
 
 # Initialize the model
-metadata = data.metadata()  # Get metadata (node types, edge types)
-model = HeteroGAT(metadata, hidden_dim=16, out_dim=2)  # Example: 2 output classes
+model = HeteroGNNWithTypes(
+    metadata=metadata,
+    in_channels=16,  # Match input feature size
+    hidden_channels=32,  # Hidden size
+    out_channels=2,  # Binary classification
+    num_edge_types=len(metadata[1]),  # Number of edge types
+    num_node_types=len(metadata[0]),  # Number of node types
+    heads=2  # Multi-head attention
+)
 
-# Example: Add labels and train/test masks
-data['user'].y = torch.tensor([0, 1, 0], dtype=torch.long)  # Example labels
-data['user'].train_mask = torch.tensor([True, True, False], dtype=torch.bool)
-data['user'].test_mask = torch.tensor([False, False, True], dtype=torch.bool)
+# Forward pass
+output = model(data)
+# Print output
+for node_type, logits in output.items():
+    print(f"{node_type} output shape: {logits.shape}")
 
+# Example data structure for node labels
+# Replace with your actual node labels for classification
+data['user'].y = torch.randint(0, 2, (100,))  # Random binary labels for users
 
-random.seed(SEED)
-# Assuming 100 nodes in the 'user' type
-num_nodes = 100
-data['user'].y = torch.tensor([0 if i < 50 else 1 for i in range(num_nodes)], dtype=torch.long)  # 0: benign, 1: sybil
+# Split indices for training and testing
+train_mask, test_mask = train_test_split(
+    torch.arange(data['user'].x.size(0)), test_size=0.2, random_state=42
+)
 
-# Randomly select nodes for each category
-benign_indices = [i for i in range(50)]  # First 50 nodes are benign
-sybil_indices = [i for i in range(50, 100)]  # Next 50 nodes are sybil
+# Create train/test masks
+data['user'].train_mask = torch.zeros(data['user'].x.size(0), dtype=torch.bool)
+data['user'].test_mask = torch.zeros(data['user'].x.size(0), dtype=torch.bool)
 
-# Shuffle indices to randomize selection
-random.shuffle(benign_indices)
-random.shuffle(sybil_indices)
+data['user'].train_mask[train_mask] = True
+data['user'].test_mask[test_mask] = True
 
-# Assign nodes for train and test
-train_benign = benign_indices[:10]
-train_sybil = sybil_indices[:10]
-test_benign = benign_indices[10:20]
-test_sybil = sybil_indices[10:20]
+# Define loss and optimizer
+criterion = torch.nn.CrossEntropyLoss()  # Suitable for multi-class classification
+optimizer = torch.optim.Adam(model.parameters(), lr=0.001, weight_decay=5e-4)
 
-# Combine indices
-train_indices = train_benign + train_sybil
-test_indices = test_benign + test_sybil
-
-# Create masks
-train_mask = [i in train_indices for i in range(num_nodes)]
-test_mask = [i in test_indices for i in range(num_nodes)]
-
-# Add masks to the data object
-data['user'].train_mask = torch.tensor(train_mask, dtype=torch.bool)
-data['user'].test_mask = torch.tensor(test_mask, dtype=torch.bool)
-
-# Verify the distribution
-# print("Train Mask:", data['user'].train_mask.nonzero(as_tuple=True)[0])
-# print("Test Mask:", data['user'].test_mask.nonzero(as_tuple=True)[0])
-# print("Labels (Train):", data['user'].y[data['user'].train_mask])
-# print("Labels (Test):", data['user'].y[data['user'].test_mask])
-
-
-# Optimizer and loss function
-optimizer = torch.optim.Adam(model.parameters(), lr=0.01, weight_decay=5e-4)
-criterion = torch.nn.CrossEntropyLoss()
-
-
-
-
-
-new_edge_index_dict = {}
-for edge_type, edge_index in data.edge_index_dict.items():
-    # Transpose the edge_index and store in the new dictionary
-    new_edge_index_dict[edge_type] = edge_index.T.clone()
-    print(f"Edge type {edge_type}: Transposed shape = {new_edge_index_dict[edge_type].shape}")
-
-
-
-
-combined_tensor = torch.cat(list(data.x_dict.values()), dim=0)
-
-print(combined_tensor.type)
- 
 # Training loop
-for epoch in range(50):  # Number of epochs
-    model.train()
-    optimizer.zero_grad()
+def train():
+    model.train()  # Set model to training mode
+    optimizer.zero_grad()  # Clear previous gradients
 
     # Forward pass
-    
-    out = model(combined_tensor, new_edge_index_dict)
+    out_dict = model(data)
+    out = out_dict['user']  # Focus on the target node type
 
-    # Compute loss for the 'user' node type
+    # Compute loss only for training nodes
     train_mask = data['user'].train_mask
-    loss = criterion(out['user'][train_mask], data['user'].y[train_mask])
+    loss = criterion(out[train_mask], data['user'].y[train_mask])
 
-    # Backward pass
-    loss.backward()
-    optimizer.step()
+    # Backward pass and optimization
+    loss.backward(retain_graph=True )  # Compute gradients
+    optimizer.step()  # Update model parameters
 
-    print(f"Epoch {epoch + 1}, Loss: {loss.item()}")
+    return loss.item()
 
-# Evaluate on test set
-model.eval()
-test_mask = data['user'].test_mask
-pred = out['user'][test_mask].argmax(dim=1)
-acc = (pred == data['user'].y[test_mask]).sum() / test_mask.sum()
-print(f"Test Accuracy: {acc:.4f}")
+# Testing function
+@torch.no_grad()
+def test():
+    model.eval()  # Set model to evaluation mode
 
+    # Forward pass
+    out_dict = model(data)
+    out = out_dict['user']
+
+    # Get predictions
+    pred = out.argmax(dim=1)  # Predicted class labels
+
+    # Evaluate accuracy on train and test sets
+    train_mask = data['user'].train_mask
+    test_mask = data['user'].test_mask
+
+    train_acc = (pred[train_mask] == data['user'].y[train_mask]).sum().item() / train_mask.sum().item()
+    test_acc = (pred[test_mask] == data['user'].y[test_mask]).sum().item() / test_mask.sum().item()
+
+    return train_acc, test_acc
+
+# Training loop
+num_epochs = 100
+for epoch in range(1, num_epochs + 1):
+    loss = train()
+    train_acc, test_acc = test()
+
+    if epoch%20==1 or epoch == num_epochs:
+        print(f"Epoch: {epoch:03d}, Loss: {loss:.4f}, Train Acc: {train_acc:.4f}, Test Acc: {test_acc:.4f}")
