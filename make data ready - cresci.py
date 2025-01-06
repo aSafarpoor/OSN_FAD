@@ -716,6 +716,49 @@ print("Shuffling completed. Output saved to:", output_file)
 
 
 
+# just a counter for statistics
+
+from collections import Counter
+
+# Counting node types and labels
+print("Counting node types and labels...")
+node_types = Counter()
+node_labels = Counter()
+for node in updated_nodes:
+    node_type = node["attributes"].get("type", "Unknown")
+    node_label = node["attributes"].get("label", "NoLabel")
+    node_types[node_type] += 1
+    node_labels[node_label] += 1
+
+# Print node type information
+print("\nNode Types and Counts:")
+for node_type, count in node_types.items():
+    print(f"Type: {node_type}, Count: {count}")
+
+# Print node label information
+print("\nNode Labels and Counts:")
+for label, count in node_labels.items():
+    print(f"Label: {label}, Count: {count}")
+
+# Counting edge types
+print("Counting edge types...")
+edge_types = Counter()
+for old_u, old_v, attributes in HG.edges(data=True):
+    edge_type = attributes.get("type", "Unknown")
+    edge_types[edge_type] += 1
+
+# Print edge type information
+print("\nEdge Types and Counts:")
+for edge_type, count in edge_types.items():
+    print(f"Type: {edge_type}, Count: {count}")
+
+# Summary
+print("\nSummary:")
+print(f"Total Node Types: {len(node_types)}")
+print(f"Total Edge Types: {len(edge_types)}")
+print(f"Total Node Labels: {len(node_labels)}")
+
+
 """
 output:
 -- node_embeddings.csv
