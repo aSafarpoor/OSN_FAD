@@ -37,7 +37,7 @@ from gensim.models.fasttext import load_facebook_vectors
 from sklearn.decomposition import PCA,IncrementalPCA
 
 SEED = 1
-
+folder_names = ['E13.csv', 'FSF.csv', 'INT.csv', 'TFP.csv', 'TWT.csv']
 
 
 """# cresci Keywords"""
@@ -262,6 +262,8 @@ folder_names = ['E13.csv', 'FSF.csv', 'INT.csv', 'TFP.csv', 'TWT.csv']
 
 id_description_dict = {}
 
+
+
 for folder_name in folder_names:
     path = f"Fake_project_dataset_csv/{folder_name}/users.csv"  # Assuming the file contains user data
     
@@ -277,6 +279,8 @@ for folder_name in folder_names:
                     
                     # Add to dictionary
                     id_description_dict[user_id] = description
+                    
+                    
                 
                 except KeyError as e:
                     print(f"Missing key in row for file {folder_name}: {e}")
@@ -300,6 +304,9 @@ for folder_name in folder_names:
 embeddings_id_description_dic = embedding_model.transform_dictionary(id_description_dict)
 with open('embeddings_id_description_dic.pickle', 'wb') as f:
     pickle.dump(embeddings_id_description_dic, f)
+    
+
+    
 print("embeddings_id_description_dic done")
 
 
@@ -360,9 +367,7 @@ try:
 except Exception as e:
     print(f"Error saving dictionary: {e}")
 
-'''
 
-'''
 with open('tweets_users_dic.pkl', 'rb') as handle:
     tweets_users_dic = pickle.load(handle)
 
@@ -374,12 +379,12 @@ for row in tqdm(tweets_users_dic.keys()):
 
 with open('tweet_id_embedding_dic.pickle', 'wb') as handle:
     pickle.dump(tweet_id_embedding_dic, handle)
-'''
 
+'''
     
 
 """# creat graph"""
-'''
+
 with open('keywords_users_dic.pickle', 'rb') as handle:
     keywords_users_dic = pickle.load(handle)
 
@@ -399,26 +404,19 @@ with open('tweet_id_embedding_dic.pickle', 'rb') as handle:
 
 
 
-
-
-
-# def print_sample(dictionary, sample_size=3):
-#     if dictionary:
-#         sample = {k: dictionary[k] for k in list(dictionary)[:sample_size]}
-#         print(f"Sample from dictionary ({len(dictionary)} entries):\n{sample}\n")
-#     else:
-#         print("Dictionary is not available.\n")
-
-# Print samples from each dictionary
-# print("Keywords Users Dictionary:")
-# print_sample(tweets_users_dic)
-
-# print("Embeddings ID Description Dictionary:")
-# print_sample(embeddings_id_description_dic)
-
-# print("Embeddings keywords_embedding:")
-# print_sample(word_embedding_dictionary)
-
+id_label_dict = {}
+for folder_name in folder_names:
+    path = f"Fake_project_dataset_csv/{folder_name}/users.csv"  # Assuming the file contains user data
+    with open(path, mode='r', encoding='utf-8', errors='ignore') as file:
+        reader = csv.DictReader(file)     
+        for row in tqdm(reader, desc=f"Processing {folder_name}"):
+            user_id = row["id"]
+            if folder_name == 'E13.csv' or folder_name == 'TFP.csv' :
+                id_label_dict[user_id] = 'benign'        
+            else:
+                id_label_dict[user_id] = 'sybil'
+with open('id_label_dict.pickle', 'wb') as f:
+    pickle.dump(id_label_dict, f)
 
 
 
@@ -447,6 +445,10 @@ print(' ----------------------          ',"251603425" in HG.nodes)
 
 print("nodes added")
 
+
+
+
+    
 # Add directed edges with types include 'following', 'follower', 'friend', 'haskeyword', 'keywordintweet', 'hastweet', 'tweetedby'
 for folder_name in ['E13.csv', 'FSF.csv', 'INT.csv', 'TFP.csv', 'TWT.csv']:
 
@@ -465,7 +467,6 @@ for folder_name in ['E13.csv', 'FSF.csv', 'INT.csv', 'TFP.csv', 'TWT.csv']:
 
             HG.add_edge(edge[0], edge[1], edge_type="follower")
             HG.add_edge(edge[1], edge[0], edge_type="following")
-print(' ----------------------          ',"251603425" in HG.nodes)
 
 for folder_name in ['E13.csv', 'FSF.csv', 'INT.csv', 'TFP.csv', 'TWT.csv']:
     path = f"Fake_project_dataset_csv/{folder_name}/friends.csv"
@@ -481,8 +482,6 @@ for folder_name in ['E13.csv', 'FSF.csv', 'INT.csv', 'TFP.csv', 'TWT.csv']:
                 set_all_user.add(edge[1])
             HG.add_edge(edge[0], edge[1], edge_type="friend")
             HG.add_edge(edge[1], edge[0], edge_type="friend")
-
-print(' ----------------------          ',"251603425" in HG.nodes)
 
 nodes = set(list(HG.nodes()))
 
@@ -527,23 +526,6 @@ with open('HG0.pickle', 'wb') as handle:
 
 
 
-
-
- # convertion in dictionary of tweets, remove user keys and now it is just tweetid and tweet
-
-# with open('tweets_users_dic.pkl', 'rb') as handle:
-#     tweets_users_dic = pickle.load(handle)
-# print("read twt")
-
-
-
-'''
-
-
-
-
-'''
-
 with open('tweet_id_embedding_dic.pickle', 'rb') as handle:
     tweet_id_embedding_dic = pickle.load(handle)
 
@@ -571,54 +553,12 @@ print(len(all_users),min(all_users),max(all_users))
 
 
 
-
-# def print_sample(dictionary, sample_size=1):
-#     sample = {k: dictionary[k] for k in list(dictionary)[:sample_size]}
-#     print(f"Sample from dictionary ({len(dictionary)} entries):\n{sample}\n")
-   
-
-
-# node_types = set()
-# for n, data in HG.nodes(data=True):
-#     # Assumes node data includes a 'type' attribute, e.g. data['type']
-#     if 'type' in data:
-#         node_types.add(data['type'])
-
-# print("Node types found in the graph:", node_types)
-
-# # 2. Print a small sample of nodes for each type
-# for nt in node_types:
-#     # collect nodes of this type
-#     nodes_of_type = [n for n, d in HG.nodes(data=True) if d.get('type') == nt]
-#     sample_nodes = nodes_of_type[:5]  # take up to 5 nodes as a sample
-#     print(f"Sample nodes of type '{nt}':", sample_nodes)
-
-# # 3. Extract the unique edge types
-# edge_types = set()
-# for u, v, key, data in HG.edges(keys=True, data=True):
-#     # Assumes edge data includes a 'type' attribute, e.g. data['type']
-#     if 'type' in data:
-#         edge_types.add(data['type'])
-
-# print("\nEdge types found in the graph:", edge_types)
-
-# # 4. Print a small sample of edges for each type
-# for et in edge_types:
-#     # collect edges of this type
-#     edges_of_type = [(u, v, k) for u, v, k, d in HG.edges(keys=True, data=True) if d.get('type') == et]
-#     sample_edges = edges_of_type[:5]  # take up to 5 edges as a sample
-#     print(f"Sample edges of type '{et}':", sample_edges)
-
-# print_sample(embeddings_id_description_dic)
-# print_sample(tweets_users_dic)
-# print_sample(word_embedding_dictionary)
-
-
 nodes = set(list(HG.nodes()))
 
 print(' ----------------------          ',"12" in HG.nodes)
 
-
+with open('id_label_dict.pickle', 'rb') as handle:
+    id_label_dict = pickle.load(handle)
 
 nodes_without_description = []
 
@@ -630,6 +570,11 @@ for node, data in tqdm(HG.nodes(data=True)):
         data["embedding"] = word_embedding_dictionary[keyword]
     if data["node_type"] == "user":
         user = node
+        try:
+            data['label'] = id_label_dict[node]
+        except:
+            data['label'] = 'unknown'
+            
         try:
             data["embedding"] = embeddings_id_description_dic[user]
         except:
@@ -670,30 +615,12 @@ for node, data in tqdm(nodes_without_description):
 
 with open('HG2.pickle', 'wb') as handle:
     pickle.dump(HG, handle)
-'''
 
-
-
-## nopde renaming to 0 to n-1
-
-##### RAM intensive
-# def relabel_heterogeneous_graph(HG):
-#     # Extract nodes and create a mapping
-#     old_to_new = {node: idx for idx, node in enumerate(HG.nodes())}
-#     new_to_old = {idx: node for node, idx in old_to_new.items()}
-    
-#     # Relabel nodes in the graph
-#     HG_relabelled = nx.relabel_nodes(HG, old_to_new)
-    
-#     return HG_relabelled, old_to_new, new_to_old
-
-# HG, old_to_new, new_to_old = relabel_heterogeneous_graph(HG)
-
-
-'''
 # Load the heterogeneous graph
 with open('HG2.pickle', 'rb') as handle:
     HG = pickle.load(handle)
+
+## renaming nodes to [0,...,n-1] 
 
 # Extract nodes and sort them
 print("Extracting and sorting nodes...")
@@ -733,6 +660,20 @@ with open('node_embeddings.csv', 'w', newline='') as file:
         embedding = node["attributes"].get("embedding", [])
         writer.writerow([node["node_id"], ','.join(map(str, embedding))])
 
+
+print("Saving node labels...")
+
+# Specify the output file name
+output_file = 'node_labels.csv'
+# Open the file in write mode
+with open(output_file, 'w', newline='') as file:
+    writer = csv.writer(file)
+    writer.writerow(['node_id', 'label'])
+    for node in updated_nodes:
+        label = node.get("attributes", {}).get("label", None)
+        writer.writerow([node["node_id"], label])
+print(f"Node labels saved successfully to {output_file}")
+
 # Save other node information to a CSV file
 print("Saving node information...")
 with open('node_information.csv', 'w', newline='') as file:
@@ -755,145 +696,30 @@ with open('edges.csv', 'w', newline='') as file:
 print("Data saved successfully with efficient edge processing.")
 
 
-'''
+# shuffle edges
+import random
+
+input_file = "edges.csv"
+output_file = "edges.csv"
+
+with open(input_file, 'r') as infile:
+    header = infile.readline()
+    rows = infile.readlines()
+
+random.shuffle(rows)
+
+with open(output_file, 'w') as outfile:
+    outfile.write(header)
+    outfile.writelines(rows)
+
+print("Shuffling completed. Output saved to:", output_file)
 
 
 
-
-
-
-    
-    
-
-'''
-import csv
-import ast
-import torch
-from torch_geometric.data import HeteroData
-from collections import defaultdict
-print("step  1")
-
-# -------------------------------------
-# Step 1: Read node information
-# -------------------------------------
-# We'll store for each node:
-# - node_type (string)
-# - old_id (might be useful if you want to preserve original node ID)
-# We'll need this to group nodes by type and to map them later.
-node_types = {}     # node_id -> node_type
-node_old_ids = {}   # node_id -> old_id
-
-with open('node_information.csv', 'r', newline='') as f:
-    reader = csv.DictReader(f)
-    for row in tqdm(reader):
-        node_id = int(row['node_id'])
-        old_id = row['old_id']
-        attributes = ast.literal_eval(row['attributes'])
-        node_type = attributes.get('node_type', None)
-
-        if node_type is None:
-            # If node_type is missing, skip this node (or handle differently)
-            continue
-
-        node_types[node_id] = node_type
-        node_old_ids[node_id] = old_id
-print("step  2")
-
-# -------------------------------------
-# Step 2: Read node embeddings
-# -------------------------------------
-# We'll directly group embeddings by node_type to avoid storing large intermediate structures.
-node_features = defaultdict(list)           # node_type -> list of embeddings
-node_ids_by_type = defaultdict(list)        # node_type -> list of node_ids in insertion order
-
-with open('node_embeddings.csv', 'r', newline='') as f:
-    reader = csv.DictReader(f)
-    for row in tqdm(reader):
-        node_id = int(row['node_id'])
-        embedding_str = row['embedding'].strip()
-
-        # Some nodes may have been skipped if node_type was missing
-        if node_id not in node_types:
-            continue
-
-        if embedding_str:
-            embedding = list(map(float, embedding_str.split(',')))
-        else:
-            embedding = []
-
-        ntype = node_types[node_id]
-        node_features[ntype].append(embedding)
-        node_ids_by_type[ntype].append(node_id)
-print("step  3")
-
-# -------------------------------------
-# Step 3: Create the HeteroData and assign node embeddings
-# -------------------------------------
-hg = HeteroData()
-
-# Convert grouped embeddings to tensors
-for ntype, embeddings in tqdm(node_features.items()):
-    hg[ntype].x = torch.tensor(embeddings, dtype=torch.float)
-
-# Create a mapping from node_id to node index per node_type
-type_node_index_map = {
-    ntype: {nid: i for i, nid in enumerate(node_ids)}
-    for ntype, node_ids in tqdm(node_ids_by_type.items())
-}
-print("step  4")
-# -------------------------------------
-# Step 4: Add edges to HeteroData
-# -------------------------------------
-# We'll read each edge and directly insert it into the appropriate edge type block without storing all edges.
-with open('edges.csv', 'r', newline='') as f:
-    reader = csv.DictReader(f)
-    # To minimize memory usage, we process edges one by one.
-    # We'll store edge_index incrementally.
-    # For efficiency in a large graph, you might first store them in a buffer per edge_type and then create tensors.
-    # But here we'll just append them as we go. This might be less memory-efficient if there are a huge number of edges,
-    # but it avoids large intermediate structures.
-    edge_buffers = defaultdict(lambda: [[], []]) 
-    # edge_buffers[(src_type, edge_type, tgt_type)] = [[list_of_source_indices], [list_of_target_indices]]
-
-    for row in tqdm(reader):
-        source = int(row['source'])
-        target = int(row['target'])
-        attributes = ast.literal_eval(row['attributes'])
-        edge_type = attributes.get('edge_type', None)
-
-        # If edge_type or node_type missing, skip
-        if edge_type is None or source not in node_types or target not in node_types:
-            continue
-
-        src_type = node_types[source]
-        tgt_type = node_types[target]
-
-        etype = (src_type, edge_type, tgt_type)
-
-        # Convert source and target to local indices
-        src_idx = type_node_index_map[src_type][source]
-        tgt_idx = type_node_index_map[tgt_type][target]
-
-        edge_buffers[etype][0].append(src_idx)
-        edge_buffers[etype][1].append(tgt_idx)
-
-# Convert collected edges into tensors
-for etype, (src_list, tgt_list) in tqdm(edge_buffers.items()):
-    hg[etype].edge_index = torch.tensor([src_list, tgt_list], dtype=torch.long)
-
-print("Constructed HeteroData with reduced memory usage:")
-print(hg)
-
-# HeteroData(
-#   keyword={ x=[796590, 32] },
-#   tweet={ x=[2827757, 32] },
-#   user={ x=[1292763, 32] },
-#   (user, following, user)={ edge_index=[2, 1849092] },
-#   (user, friend, user)={ edge_index=[2, 4818570] },
-#   (user, follower, user)={ edge_index=[2, 1849092] },
-#   (user, hastweet, tweet)={ edge_index=[2, 2827757] },
-#   (keyword, keywordintweet, tweet)={ edge_index=[2, 19323433] },
-#   (tweet, tweetedby, user)={ edge_index=[2, 2827757] },
-#   (tweet, haskeyword, keyword)={ edge_index=[2, 19323433] }
-# )
-'''
+"""
+output:
+-- node_embeddings.csv
+-- node_labels.csv
+-- node_information.csv
+-- edges.csv
+"""
