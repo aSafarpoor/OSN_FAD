@@ -363,7 +363,6 @@ def train_in_chunks(
         test_batches_count = 0
 
         for batch_i, chunk_edges in tqdm(enumerate(edge_generator, start=1)):
-            
    
             # 1) BUILD SUBGRAPH
             edge_dict, unique_nodes = build_subgraph(chunk_edges, node_type_map)
@@ -472,6 +471,7 @@ def train_in_chunks(
 
             epoch_train_loss += loss.item()
 
+            
             print(f"  Batch {batch_i}: edges={len(chunk_edges)}, train_users={num_labeled_train}, loss={loss.item():.4f}")
 
         # end of epoch
@@ -484,6 +484,8 @@ def train_in_chunks(
 
         print(f"[Epoch {epoch+1}] Avg Train Loss: {avg_train_loss:.4f}")
         print(f"[Epoch {epoch+1}] Test: loss={epoch_test_metrics['loss']:.4f}, acc={epoch_test_metrics['acc']:.4f}, auc={epoch_test_metrics['auc']:.4f}")
+        
+        torch.save(model.state_dict(), "training_time_hetero_gnn_model.pth")
 
     return model
 
@@ -492,6 +494,10 @@ def train_in_chunks(
 ###############################################################################
 # 8) RUN / TEST
 ###############################################################################
+
+import datetime
+
+
 if __name__ == "__main__":
     # Adjust CSV file paths here
     node_info_path   = "node_information.csv"
@@ -499,15 +505,31 @@ if __name__ == "__main__":
     embed_path       = "node_embeddings.csv"
     edges_path       = "edges.csv"
 
+    chunk_size=50000
+    num_epochs=2
+        
     trained_model = train_in_chunks(
         node_info_path=node_info_path,
         node_labels_path=node_labels_path,
         embed_path=embed_path,
         edges_path=edges_path,
         embedding_dim=32,   # Change to match your embedding vector size
-        chunk_size=50000,
-        num_epochs=2
+        chunk_size=chunk_size,
+        num_epochs=num_epochs
     )
 
     # Optionally save the final model
-    torch.save(trained_model.state_dict(), "hetero_gnn_model.pth")
+    
+    checkpoint = {
+        'state_dict': trained_model.state_dict(),
+        'metadata': {
+            'trained_time': datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+            'description': 'Hetero-GNN model with extended metadata.',
+            'num_epochs': num_epochs,  # or your final epoch
+            'chunk_size': chunk_size
+        }
+    }
+    timestamp = datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
+    filename = f"hetero_gnn_model_{timestamp}.pth"
+        
+    torch.save(checkpoint, filename)
