@@ -6,7 +6,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 from collections import defaultdict
 from tqdm import tqdm
-
+from sklearn.metrics import accuracy_score, roc_auc_score
+import random
 ###############################################################################
 # 1) BUILD NODE INDEX
 ###############################################################################
@@ -172,6 +173,7 @@ class SimpleHeteroGAT(nn.Module):
     def __init__(self, in_dim, hidden_dim, out_dim):
         super().__init__()
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        print(f'device is {self.device}')
         self.proj = nn.Linear(in_dim, hidden_dim)
         self.attn_l = nn.ParameterDict().to(self.device)
         self.attn_r = nn.ParameterDict().to(self.device)
@@ -192,9 +194,6 @@ class SimpleHeteroGAT(nn.Module):
         x_dict: { ntype: Tensor of shape [num_local_nodes, in_dim], all on same device }
         edge_dict: { (src_type,e_type,dst_type): [(src_local, dst_local), ...], ... }
         """
-
-        
-
  
         # 1) Project
         for ntype in x_dict:
@@ -232,8 +231,69 @@ class SimpleHeteroGAT(nn.Module):
         return out_dict
 
 ###############################################################################
+# 404) Extra Functions
+###############################################################################
+
+def compute_metrics(logits, labels_t, loss_fn):
+    """
+    logits: Tensor of shape [N_test, 2], for binary classification
+    labels_t: Tensor of shape [N_test], with values {0,1}
+    loss_fn: CrossEntropyLoss or similar
+
+    Returns: dict with 'loss', 'acc', 'auc'
+    """
+    # 1) Loss
+    loss_val = loss_fn(logits, labels_t).item()
+
+    # 2) Accuracy
+    preds = torch.argmax(logits, dim=1)  # shape [N_test]
+    acc_val = accuracy_score(labels_t.cpu().numpy(), preds.cpu().numpy())
+
+    # 3) AUC
+    # For AUC, we need the probability of the positive class, i.e. index=1
+    probs = torch.softmax(logits, dim=1)[:, 1].detach().cpu().numpy()
+    auc_val = roc_auc_score(labels_t.cpu().numpy(), probs)
+
+    return {'loss': loss_val, 'acc': acc_val, 'auc': auc_val}
+
+
+def get_labeled_users(labels_map, node_type_map, test_ratio=0.2, seed=42):
+    """
+    Gather user nodes labeled 'sybil' or 'benign'.
+    Return:
+      train_nodes = list of user IDs
+      test_nodes  = list of user IDs
+      bin_labels  = dict { node_id -> 0 or 1 }
+    """
+    # fix random seed for reproducibility
+    random.seed(seed)
+
+    # We'll store all user nodes with label sybil/benign
+    candidate_nodes = []
+    bin_labels = {}
+    for nid, lab in labels_map.items():
+        # only if type is 'user'
+        if node_type_map.get(nid) == 'user':
+            # we only consider sybil or benign
+            if lab in ['sybil', 'benign']:
+                # map sybil -> 1, benign -> 0
+                bin_label = 1 if lab == 'sybil' else 0
+                candidate_nodes.append(nid)
+                bin_labels[nid] = bin_label
+
+    # Shuffle and do a simple train/test split
+    random.shuffle(candidate_nodes)
+    test_size = int(len(candidate_nodes) * test_ratio)
+    test_nodes = candidate_nodes[:test_size]
+    train_nodes = candidate_nodes[test_size:]
+
+    return train_nodes, test_nodes, bin_labels
+
+
+###############################################################################
 # 7) TRAIN IN CHUNKS
 ###############################################################################
+
 def train_in_chunks(
     node_info_path,
     node_labels_path,
@@ -241,15 +301,18 @@ def train_in_chunks(
     edges_path,
     embedding_dim=32,
     chunk_size=10000,
-    num_epochs=1
+    num_epochs=1,
+    test_ratio=0.2
 ):
     """
     Main training function that:
       - Loads node types/labels
+      - Splits user nodes with sybil/benign into train/test sets
       - Reads edges in chunks
       - Builds a subgraph per chunk
       - Runs a simple HeteroGAT model
-      - Ensures all data is on the correct device to avoid mismatch
+      - Computes CrossEntropy loss, plus accuracy & AUC on test subset
+      - Skips unknown-labeled or non-user nodes for supervised loss
     """
     ###########################################################################
     # A) DEVICE SETUP
@@ -264,10 +327,14 @@ def train_in_chunks(
     node_type_map, embedding_offset_map = build_node_index(node_info_path, embed_path)
     labels_map = load_labels(node_labels_path)
 
-    # Label encoding
-    unique_labels = sorted(set(labels_map.values()))
-    label_to_idx = {lab: i for i, lab in enumerate(unique_labels)}
-    num_classes = len(label_to_idx)
+    # Get sybil/benign user sets + train/test splits
+    train_nodes, test_nodes, bin_labels = get_labeled_users(labels_map, node_type_map, test_ratio=test_ratio)
+    # We'll have bin_labels[node] in {0,1} for sybil/benign
+
+    # num_classes = 2 (binary: benign=0, sybil=1)
+    num_classes = 2
+    print("Train set size:", len(train_nodes))
+    print("Test set size:", len(test_nodes))
     print("step B done")
 
     ###########################################################################
@@ -289,19 +356,19 @@ def train_in_chunks(
     for epoch in range(num_epochs):
         print(f"\n=== Epoch {epoch+1}/{num_epochs} ===")
         edge_generator = edge_chunk_reader(edges_path, chunk_size=chunk_size)
-        C = 0
-        for batch_i, chunk_edges in tqdm(enumerate(edge_generator, start=1)):
-            C +=1
-            if C>2:
-                break
-            ###############################################################
-            # 1) BUILD SUBGRAPH
-            ###############################################################
-            edge_dict, unique_nodes = build_subgraph(chunk_edges, node_type_map)
 
-            ###############################################################
+        # We'll track average training loss, and maybe test metrics across all batches
+        epoch_train_loss = 0.0
+        epoch_test_metrics = {'loss': 0.0, 'acc': 0.0, 'auc': 0.0}
+        test_batches_count = 0
+
+        for batch_i, chunk_edges in tqdm(enumerate(edge_generator, start=1)):
+            
+   
+            # 1) BUILD SUBGRAPH
+            edge_dict, unique_nodes = build_subgraph(chunk_edges, node_type_map)
+            
             # 2) GROUP NODES BY TYPE + CREATE LOCAL ID MAP
-            ###############################################################
             node_lists = defaultdict(list)
             for gid in unique_nodes:
                 ntype = node_type_map[gid]
@@ -312,9 +379,7 @@ def train_in_chunks(
             local_id_map = {}
             x_dict = {}
 
-            ###############################################################
             # 3) LOAD EMBEDDINGS + BUILD x_dict
-            ###############################################################
             for ntype, g_list in node_lists.items():
                 # local reindex
                 g_to_l = {g: i for i, g in enumerate(g_list)}
@@ -338,9 +403,7 @@ def train_in_chunks(
                 emb_tensor = torch.from_numpy(big_np).to(device)
                 x_dict[ntype] = emb_tensor
 
-            ###############################################################
             # 4) CONVERT EDGES TO LOCAL INDICES
-            ###############################################################
             local_edge_dict = defaultdict(list)
             for (src_t, e_type, dst_t), e_list in edge_dict.items():
                 s_map = local_id_map[src_t]
@@ -351,46 +414,79 @@ def train_in_chunks(
                         d_local = d_map[dst]
                         local_edge_dict[(src_t, e_type, dst_t)].append((s_local, d_local))
 
-            ###############################################################
             # 5) MODEL INIT RELATIONS + FORWARD
-            ###############################################################
             model.init_relations(local_edge_dict)
             out_dict = model(x_dict, local_edge_dict)  # all on same device
 
-            ###############################################################
-            # 6) LOSS COMPUTATION (on 'user' nodes)
-            ###############################################################
+            # 6) LOSS COMPUTATION (TRAIN) on user nodes that are in the train set
             loss = torch.tensor(0.0, device=device)
-            num_labeled = 0
+            num_labeled_train = 0
 
             if 'user' in node_lists:
                 user_out = out_dict['user']  # shape [num_local_users, out_dim]
                 user_map = local_id_map['user']
-                labeled_indices = []
-                labeled_values = []
+
+                # gather local indices for train nodes
+                train_indices = []
+                train_labels = []
+                # gather local indices for test nodes (to measure metrics)
+                test_indices = []
+                test_labels = []
+
                 for g in node_lists['user']:
-                    if g in labels_map:
-                        labeled_indices.append(user_map[g])
-                        labeled_values.append(label_to_idx[labels_map[g]])
+                    if g in bin_labels:
+                        # is g in train or test?
+                        if g in train_nodes:
+                            train_indices.append(user_map[g])
+                            train_labels.append(bin_labels[g])
+                        elif g in test_nodes:
+                            test_indices.append(user_map[g])
+                            test_labels.append(bin_labels[g])
 
-                if labeled_indices:
-                    labeled_indices_t = torch.tensor(labeled_indices, dtype=torch.long, device=device)
-                    labeled_values_t = torch.tensor(labeled_values, dtype=torch.long, device=device)
-                    logits = user_out[labeled_indices_t]
-                    loss = loss_fn(logits, labeled_values_t)
-                    num_labeled = len(labeled_indices)
+                # TRAIN LOSS
+                if train_indices:
+                    train_indices_t = torch.tensor(train_indices, dtype=torch.long, device=device)
+                    train_labels_t = torch.tensor(train_labels, dtype=torch.long, device=device)
+                    logits_train = user_out[train_indices_t]
+                    loss = loss_fn(logits_train, train_labels_t)
+                    num_labeled_train = len(train_indices)
 
-            ###############################################################
-            # 7) OPTIMIZER STEP
-            ###############################################################
-            if num_labeled > 0:
+                # TEST METRICS
+                if test_indices:
+                    test_indices_t = torch.tensor(test_indices, dtype=torch.long, device=device)
+                    test_labels_t = torch.tensor(test_labels, dtype=torch.long, device=device)
+                    logits_test = user_out[test_indices_t]
+
+                    test_res = compute_metrics(logits_test, test_labels_t, loss_fn)
+                    # accumulate
+                    epoch_test_metrics['loss'] += test_res['loss']
+                    epoch_test_metrics['acc'] += test_res['acc']
+                    epoch_test_metrics['auc'] += test_res['auc']
+                    test_batches_count += 1
+
+            # 7) OPTIMIZER STEP (only if there's some labeled training data)
+            if num_labeled_train > 0:
                 optimizer.zero_grad()
                 loss.backward()
                 optimizer.step()
 
-            print(f"  Batch {batch_i}: edges={len(chunk_edges)}, labeled_users={num_labeled}, loss={loss.item():.4f}")
+            epoch_train_loss += loss.item()
+
+            print(f"  Batch {batch_i}: edges={len(chunk_edges)}, train_users={num_labeled_train}, loss={loss.item():.4f}")
+
+        # end of epoch
+        # average metrics
+        avg_train_loss = epoch_train_loss / (batch_i if batch_i>0 else 1)
+        if test_batches_count > 0:
+            epoch_test_metrics['loss'] /= test_batches_count
+            epoch_test_metrics['acc']  /= test_batches_count
+            epoch_test_metrics['auc']  /= test_batches_count
+
+        print(f"[Epoch {epoch+1}] Avg Train Loss: {avg_train_loss:.4f}")
+        print(f"[Epoch {epoch+1}] Test: loss={epoch_test_metrics['loss']:.4f}, acc={epoch_test_metrics['acc']:.4f}, auc={epoch_test_metrics['auc']:.4f}")
 
     return model
+
 
 
 ###############################################################################
