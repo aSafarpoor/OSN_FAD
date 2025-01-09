@@ -8,6 +8,11 @@ from collections import defaultdict
 from tqdm import tqdm
 from sklearn.metrics import accuracy_score, roc_auc_score
 import random
+
+from torch_geometric.data import HeteroData
+from torch_geometric.nn import GATConv, HeteroConv
+
+
 ###############################################################################
 # 1) BUILD NODE INDEX
 ###############################################################################
@@ -146,6 +151,7 @@ def load_node_embeddings_for_batch(node_ids, embedding_offset_map, embed_path, e
 ###############################################################################
 # 5) BUILD SUBGRAPH
 ###############################################################################
+
 def build_subgraph(chunk_edges, node_type_map):
     """
     chunk_edges: list of (src, dst, edge_type)
@@ -166,9 +172,55 @@ def build_subgraph(chunk_edges, node_type_map):
 
     return edge_dict, unique_nodes
 
+def build_hetero_data(x_dict, edge_dict):
+    """
+    Converts your (x_dict, edge_dict) format into a PyG HeteroData object.
+
+    Parameters
+    ----------
+    x_dict : dict
+        { node_type: FloatTensor of shape [num_nodes_of_that_type, in_dim] }
+
+    edge_dict : dict
+        { (src_type, e_type, dst_type): List[(src_idx, dst_idx), ...], ... }
+
+    Returns
+    -------
+    data : HeteroData
+        A PyG HeteroData object containing your node features and edge indices.
+    """
+    data = HeteroData()
+
+    # 1) Add node features
+    for node_type, x_tensor in x_dict.items():
+        data[node_type].x = x_tensor
+
+    # 2) Add edges per (src_type, e_type, dst_type)
+    for (src_type, e_type, dst_type), edges in edge_dict.items():
+        if len(edges) > 0:
+            src, dst = zip(*edges)
+        else:
+            src, dst = [], []
+
+        src = torch.tensor(src, dtype=torch.long)
+        dst = torch.tensor(dst, dtype=torch.long)
+
+        # Create the edge_index for this relation
+        # shape = [2, num_edges]
+        edge_index = torch.stack([src, dst], dim=0)
+
+        # In PyG, we store this by data[(src_type, e_type, dst_type)].edge_index
+        data[(src_type, dst_type)].edge_index = edge_index
+        # Optionally store the relation type if needed
+        # data[(src_type, dst_type)].edge_type = e_type
+
+    return data
+
 ###############################################################################
 # 6) SIMPLE HETERO GAT MODEL
 ###############################################################################
+
+'''
 class SimpleHeteroGAT(nn.Module):
     def __init__(self, in_dim, hidden_dim, out_dim):
         super().__init__()
@@ -229,7 +281,124 @@ class SimpleHeteroGAT(nn.Module):
             out_dict['user'] = self.out_layer(out_dict['user'])
 
         return out_dict
+'''
 
+class SimpleHeteroGATPyG(nn.Module):
+    """
+    A refactored heterogeneous multi-head GAT using PyTorch Geometric.
+
+    It preserves your original input format:
+      - x_dict : { node_type: [num_nodes_of_type, in_dim] }
+      - edge_dict : { (src_type, e_type, dst_type): [(src_idx, dst_idx), ...], ... }
+
+    Internally:
+      1) Builds a PyG HeteroData object from x_dict and edge_dict.
+      2) Projects each node_type's features to hidden_dim (via self.proj).
+      3) Uses HeteroConv (a container of GATConv for each edge type) to do multi-head attention.
+      4) ELU activation.
+      5) Final output layer for 'user' node type (if present).
+
+    Typical usage:
+      model = SimpleHeteroGATPyG(in_dim=16, hidden_dim=32, out_dim=8, num_heads=4)
+      out_dict = model(x_dict, edge_dict)
+    """
+
+    def __init__(self, in_dim, hidden_dim, out_dim, num_heads=4):
+        super().__init__()
+        self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        print(f'[SimpleHeteroGATPyG] Using device: {self.device}')
+
+        self.in_dim = in_dim
+        self.hidden_dim = hidden_dim
+        self.out_dim = out_dim
+        self.num_heads = num_heads
+
+        # Projection from in_dim -> hidden_dim
+        self.proj = nn.Linear(in_dim, hidden_dim)
+
+        # We'll build a HeteroConv container dynamically in forward() once we see the actual edge types.
+        # But let's define a placeholder here:
+        self.hetero_conv = None
+
+        # Final layer for the 'user' node type: GAT output is [hidden_dim * num_heads] if concat=True
+        self.out_layer = nn.Linear(hidden_dim * num_heads, out_dim)
+
+        # Optional: init weights
+        self._init_weights()
+
+    def _init_weights(self):
+        nn.init.xavier_uniform_(self.proj.weight)
+        nn.init.zeros_(self.proj.bias)
+        nn.init.xavier_uniform_(self.out_layer.weight)
+        nn.init.zeros_(self.out_layer.bias)
+
+    def forward(self, x_dict, edge_dict):
+        """
+        Parameters
+        ----------
+        x_dict : dict
+            { node_type: FloatTensor [num_nodes, in_dim] }
+        edge_dict : dict
+            { (src_type, e_type, dst_type): [(src_idx, dst_idx), ...], ... }
+
+        Returns
+        -------
+        out_dict : dict
+            { node_type: updated node features }
+            If 'user' is in out_dict, it will have shape [num_user_nodes, out_dim].
+            Otherwise, node types have shape [num_nodes, hidden_dim * num_heads].
+        """
+        # 1) Build HeteroData
+        data = build_hetero_data(x_dict, edge_dict)
+        data = data.to(self.device)  # move everything to device
+
+        # 2) Project each node type from in_dim -> hidden_dim
+        #    We can apply the projection in-place and store back to data[node_type].x
+        for node_type in data.node_types:
+            x_in = data[node_type].x  # [num_nodes, in_dim]
+            data[node_type].x = self.proj(x_in)  # [num_nodes, hidden_dim]
+
+        # 3) Build or update hetero_conv if not already done
+        #    We'll create a GATConv for each edge type
+        if self.hetero_conv is None:
+            conv_dict = {}
+            for edge_type in data.edge_types:
+                # Each GATConv:
+                #   - in_channels = hidden_dim
+                #   - out_channels = hidden_dim
+                #   - heads = self.num_heads
+                #   - concat=True => output dimension is hidden_dim * num_heads
+                conv_dict[edge_type] = GATConv(
+                    in_channels=self.hidden_dim,
+                    out_channels=self.hidden_dim,
+                    heads=self.num_heads,
+                    concat=True,      # [hidden_dim * num_heads]
+                    negative_slope=0.2,
+                    dropout=0.0,
+                    add_self_loops = False
+                )
+            self.hetero_conv = HeteroConv(conv_dict, aggr='sum').to(self.device)
+
+        # 4) Forward pass through hetero_conv
+        #    data.node_types => dictionary { node_type: [num_nodes, hidden_dim] }
+        #    returns { node_type: [num_nodes, hidden_dim * num_heads] }
+        out_feats = self.hetero_conv(
+            x_dict={ntype: data[ntype].x for ntype in data.node_types},
+            edge_index_dict={etype: (data[etype].edge_index)
+                             for etype in data.edge_types}
+        )
+
+        # 5) Apply ELU activation for each node type
+        for ntype in out_feats:
+            out_feats[ntype] = F.elu(out_feats[ntype])
+
+        # 6) If 'user' is present, apply the final out_layer
+        if 'user' in out_feats:
+            out_feats['user'] = self.out_layer(out_feats['user'])
+
+        return out_feats
+
+    
 ###############################################################################
 # 404) Extra Functions
 ###############################################################################
@@ -293,6 +462,24 @@ def get_labeled_users(labels_map, node_type_map, test_ratio=0.2, seed=42):
 ###############################################################################
 # 7) TRAIN IN CHUNKS
 ###############################################################################
+import torch
+import torch.nn as nn
+import numpy as np
+from tqdm import tqdm
+from collections import defaultdict
+
+# ---------------------------------------------------------------------------
+# Supporting functions assumed to exist in your environment:
+#   build_node_index(...)
+#   load_labels(...)
+#   get_labeled_users(...)
+#   edge_chunk_reader(...)
+#   build_subgraph(...)
+#   load_node_embeddings_for_batch(...)
+#   compute_metrics(...)
+#
+#   model = SimpleHeteroGATPyG(...)  # or your GNN class
+# ---------------------------------------------------------------------------
 
 def train_in_chunks(
     node_info_path,
@@ -306,67 +493,64 @@ def train_in_chunks(
 ):
     """
     Main training function that:
-      - Loads node types/labels
-      - Splits user nodes with sybil/benign into train/test sets
-      - Reads edges in chunks
-      - Builds a subgraph per chunk
-      - Runs a simple HeteroGAT model
-      - Computes CrossEntropy loss, plus accuracy & AUC on test subset
-      - Skips unknown-labeled or non-user nodes for supervised loss
+      - Loads node types/labels.
+      - Splits user nodes with sybil/benign into train/test sets.
+      - Reads edges in chunks.
+      - Builds a subgraph per chunk.
+      - Runs a simple HeteroGAT model (PyG-based or custom).
+      - Computes CrossEntropy loss, plus accuracy & AUC on test subset.
+      - Skips unknown-labeled or non-user nodes for supervised loss.
     """
-    ###########################################################################
     # A) DEVICE SETUP
-    ###########################################################################
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print("Running on device:", device)
-    print("step A done")
+    print("Step A done.")
 
-    ###########################################################################
     # B) LOAD MAPS + LABELS
-    ###########################################################################
     node_type_map, embedding_offset_map = build_node_index(node_info_path, embed_path)
     labels_map = load_labels(node_labels_path)
 
-    # Get sybil/benign user sets + train/test splits
-    train_nodes, test_nodes, bin_labels = get_labeled_users(labels_map, node_type_map, test_ratio=test_ratio)
-    # We'll have bin_labels[node] in {0,1} for sybil/benign
+    # Split user nodes into train/test sets (sybil = 1, benign = 0)
+    train_nodes, test_nodes, bin_labels = get_labeled_users(
+        labels_map, node_type_map, test_ratio=test_ratio
+    )
 
-    # num_classes = 2 (binary: benign=0, sybil=1)
-    num_classes = 2
-    print("Train set size:", len(train_nodes))
-    print("Test set size:", len(test_nodes))
-    print("step B done")
+    num_classes = 2  # binary classification
+    print(f"Train set size: {len(train_nodes)}")
+    print(f"Test set size:  {len(test_nodes)}")
+    print("Step B done.")
 
-    ###########################################################################
     # C) CREATE MODEL
-    ###########################################################################
-    model = SimpleHeteroGAT(
+    # Example using the PyG-based model
+    model = SimpleHeteroGATPyG(
         in_dim=embedding_dim,
         hidden_dim=64,
-        out_dim=num_classes
-    ).to(device)  # move model to device
+        out_dim=num_classes,
+        num_heads=4
+    ).to(device)
 
     optimizer = torch.optim.Adam(model.parameters(), lr=0.01)
     loss_fn = nn.CrossEntropyLoss()
-    print("step C done")
+    print("Step C done.")
 
-    ###########################################################################
     # D) TRAIN LOOP
-    ###########################################################################
     for epoch in range(num_epochs):
         print(f"\n=== Epoch {epoch+1}/{num_epochs} ===")
+
+        # Chunk-based edge reader
         edge_generator = edge_chunk_reader(edges_path, chunk_size=chunk_size)
 
-        # We'll track average training loss, and maybe test metrics across all batches
         epoch_train_loss = 0.0
         epoch_test_metrics = {'loss': 0.0, 'acc': 0.0, 'auc': 0.0}
         test_batches_count = 0
 
-        for batch_i, chunk_edges in tqdm(enumerate(edge_generator, start=1)):
-   
-            # 1) BUILD SUBGRAPH
-            edge_dict, unique_nodes = build_subgraph(chunk_edges, node_type_map)
+    
+        for batch_i, chunk_edges in tqdm(enumerate(edge_generator, start=1), desc="Chunks"):
             
+
+            # 1) BUILD SUBGRAPH (global IDs in edge_dict, plus unique_nodes set)
+            edge_dict, unique_nodes = build_subgraph(chunk_edges, node_type_map)
+
             # 2) GROUP NODES BY TYPE + CREATE LOCAL ID MAP
             node_lists = defaultdict(list)
             for gid in unique_nodes:
@@ -381,10 +565,10 @@ def train_in_chunks(
             # 3) LOAD EMBEDDINGS + BUILD x_dict
             for ntype, g_list in node_lists.items():
                 # local reindex
-                g_to_l = {g: i for i, g in enumerate(g_list)}
-                local_id_map[ntype] = g_to_l
+                g_to_local = {g: i for i, g in enumerate(g_list)}
+                local_id_map[ntype] = g_to_local
 
-                # load embeddings from CSV
+                # Load embeddings for this batch of nodes
                 emb_data = load_node_embeddings_for_batch(
                     node_ids=g_list,
                     embedding_offset_map=embedding_offset_map,
@@ -392,13 +576,12 @@ def train_in_chunks(
                     embedding_dim=embedding_dim
                 )
 
-                # combine into one array
+                # Convert to torch Tensor
                 arr_size = (len(g_list), embedding_dim)
                 big_np = np.zeros(arr_size, dtype=np.float32)
                 for i, g in enumerate(g_list):
                     big_np[i] = emb_data[g]
 
-                # convert to torch on device
                 emb_tensor = torch.from_numpy(big_np).to(device)
                 x_dict[ntype] = emb_tensor
 
@@ -413,28 +596,27 @@ def train_in_chunks(
                         d_local = d_map[dst]
                         local_edge_dict[(src_t, e_type, dst_t)].append((s_local, d_local))
 
-            # 5) MODEL INIT RELATIONS + FORWARD
-            model.init_relations(local_edge_dict)
-            out_dict = model(x_dict, local_edge_dict)  # all on same device
+            # 5) (Optional) If using a custom GAT that needs relation init:
+            if hasattr(model, 'init_relations'):  # PyG-based model typically doesn't need this
+                model.init_relations(local_edge_dict)
 
-            # 6) LOSS COMPUTATION (TRAIN) on user nodes that are in the train set
+            # Forward pass
+            out_dict = model(x_dict, local_edge_dict)
+
+            # 6) LOSS COMPUTATION (TRAIN) on user nodes in the train set
             loss = torch.tensor(0.0, device=device)
             num_labeled_train = 0
 
             if 'user' in node_lists:
-                user_out = out_dict['user']  # shape [num_local_users, out_dim]
+                user_out = out_dict['user']  # [num_local_users, out_dim]
                 user_map = local_id_map['user']
 
-                # gather local indices for train nodes
-                train_indices = []
-                train_labels = []
-                # gather local indices for test nodes (to measure metrics)
-                test_indices = []
-                test_labels = []
+                train_indices, train_labels = [], []
+                test_indices, test_labels   = [], []
 
+                # Separate local user nodes into train/test
                 for g in node_lists['user']:
                     if g in bin_labels:
-                        # is g in train or test?
                         if g in train_nodes:
                             train_indices.append(user_map[g])
                             train_labels.append(bin_labels[g])
@@ -444,23 +626,22 @@ def train_in_chunks(
 
                 # TRAIN LOSS
                 if train_indices:
-                    train_indices_t = torch.tensor(train_indices, dtype=torch.long, device=device)
-                    train_labels_t = torch.tensor(train_labels, dtype=torch.long, device=device)
-                    logits_train = user_out[train_indices_t]
-                    loss = loss_fn(logits_train, train_labels_t)
+                    train_idx_t = torch.tensor(train_indices, dtype=torch.long, device=device)
+                    train_lbl_t = torch.tensor(train_labels, dtype=torch.long, device=device)
+                    logits_train = user_out[train_idx_t]
+                    loss = loss_fn(logits_train, train_lbl_t)
                     num_labeled_train = len(train_indices)
 
                 # TEST METRICS
                 if test_indices:
-                    test_indices_t = torch.tensor(test_indices, dtype=torch.long, device=device)
-                    test_labels_t = torch.tensor(test_labels, dtype=torch.long, device=device)
-                    logits_test = user_out[test_indices_t]
+                    test_idx_t = torch.tensor(test_indices, dtype=torch.long, device=device)
+                    test_lbl_t = torch.tensor(test_labels, dtype=torch.long, device=device)
+                    logits_test = user_out[test_idx_t]
 
-                    test_res = compute_metrics(logits_test, test_labels_t, loss_fn)
-                    # accumulate
+                    test_res = compute_metrics(logits_test, test_lbl_t, loss_fn)
                     epoch_test_metrics['loss'] += test_res['loss']
-                    epoch_test_metrics['acc'] += test_res['acc']
-                    epoch_test_metrics['auc'] += test_res['auc']
+                    epoch_test_metrics['acc']  += test_res['acc']
+                    epoch_test_metrics['auc']  += test_res['auc']
                     test_batches_count += 1
 
             # 7) OPTIMIZER STEP (only if there's some labeled training data)
@@ -471,24 +652,26 @@ def train_in_chunks(
 
             epoch_train_loss += loss.item()
 
-            
-            print(f"  Batch {batch_i}: edges={len(chunk_edges)}, train_users={num_labeled_train}, loss={loss.item():.4f}")
+            print(
+                f"  Batch {batch_i}: edges={len(chunk_edges)}, "
+                f"train_users={num_labeled_train}, loss={loss.item():.4f}"
+            )
 
-        # end of epoch
-        # average metrics
-        avg_train_loss = epoch_train_loss / (batch_i if batch_i>0 else 1)
+        # End of epoch
+        avg_train_loss = epoch_train_loss / max(batch_i, 1)
         if test_batches_count > 0:
-            epoch_test_metrics['loss'] /= test_batches_count
-            epoch_test_metrics['acc']  /= test_batches_count
-            epoch_test_metrics['auc']  /= test_batches_count
+            for k in epoch_test_metrics:
+                epoch_test_metrics[k] /= test_batches_count
 
         print(f"[Epoch {epoch+1}] Avg Train Loss: {avg_train_loss:.4f}")
-        print(f"[Epoch {epoch+1}] Test: loss={epoch_test_metrics['loss']:.4f}, acc={epoch_test_metrics['acc']:.4f}, auc={epoch_test_metrics['auc']:.4f}")
-        
+        print(
+            f"[Epoch {epoch+1}] Test: loss={epoch_test_metrics['loss']:.4f}, "
+            f"acc={epoch_test_metrics['acc']:.4f}, auc={epoch_test_metrics['auc']:.4f}"
+        )
+
         torch.save(model.state_dict(), "training_time_hetero_gnn_model.pth")
 
     return model
-
 
 
 ###############################################################################
