@@ -18,11 +18,14 @@ from torch_geometric.nn import GATConv, HeteroConv
 ###############################################################################
 # 1) SETUP LOGGING
 ###############################################################################
+timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+
+# Configure logging
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s [%(levelname)s] %(message)s',
     handlers=[
-        logging.FileHandler('my_log_file.log', mode='a', encoding='utf-8'),
+        logging.FileHandler(f'my_log_file_{timestamp}.log', mode='a', encoding='utf-8'),
         logging.StreamHandler()
     ]
 )
