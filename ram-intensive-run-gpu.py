@@ -1,16 +1,16 @@
 import os
 import csv
 import ast
-import random
-import datetime
-import logging
 import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from tqdm import tqdm
 from collections import defaultdict
+from tqdm import tqdm
 from sklearn.metrics import accuracy_score, roc_auc_score
+import random
+import datetime
+import logging
 
 # PyG imports
 from torch_geometric.nn import GATConv, HeteroConv
@@ -20,7 +20,7 @@ from torch_geometric.nn import GATConv, HeteroConv
 ###############################################################################
 timestamp = datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
 
-# Configure logging
+# Configure logging: writes to console + a timestamped file
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s [%(levelname)s] %(message)s',
@@ -31,7 +31,7 @@ logging.basicConfig(
 )
 
 ###############################################################################
-# 2) UTILITY FUNCTIONS
+# 2) UTILS FOR REPRODUCIBILITY + FILE I/O
 ###############################################################################
 def set_random_seeds(seed=42):
     """
@@ -60,18 +60,19 @@ def _write_ids(filename, ids_set):
             f.write(f"{val}\n")
 
 ###############################################################################
-# 3) READING CSV FILES
+# 3) LOAD CSVs
 ###############################################################################
 def build_node_type_map(node_info_path):
     """
-    Reads node_information.csv (columns: node_id, old_id, attributes)
+    Reads node_information.csv: [node_id, old_id, attributes]
       'attributes' is a JSON-like string, e.g. {"node_type": "user"}
-    Returns { node_id -> node_type }
+    Returns: 
+      node_type_map = {node_id -> node_type}
     """
     node_type_map = {}
     with open(node_info_path, 'r', encoding='utf-8') as f:
         reader = csv.DictReader(f)
-        for row in reader:
+        for row in tqdm(reader, desc="Reading node info (once)"):
             nid = int(row['node_id'])
             attr_dict = ast.literal_eval(row['attributes'])
             node_type = attr_dict.get('node_type', 'unknown')
@@ -80,13 +81,13 @@ def build_node_type_map(node_info_path):
 
 def load_labels(node_labels_path):
     """
-    Reads node_labels.csv (columns: node_id, label)
-    Returns { node_id -> label_str }
+    Reads node_labels.csv: [node_id, label].
+    Returns: labels_map = {node_id -> label_str}
     """
     labels_map = {}
     with open(node_labels_path, 'r', encoding='utf-8') as f:
         reader = csv.DictReader(f)
-        for row in reader:
+        for row in tqdm(reader, desc="Reading node labels (once)"):
             nid = int(row['node_id'])
             label_str = row['label']
             labels_map[nid] = label_str
@@ -94,16 +95,17 @@ def load_labels(node_labels_path):
 
 def load_all_embeddings(embed_path, embedding_dim):
     """
-    Reads node_embeddings.csv (assumes columns: node_id, embedding_str)
-      where embedding_str looks like "val1,val2,val3,..."
-    Returns { node_id -> np.array([...], dtype=float32) }
+    Reads ALL node_embeddings.csv once.
+      Format assumed: node_id, "val1,val2,val3,..."
+    Returns:
+      all_embeddings = { node_id -> np.array([embedding_dim], dtype=float32) }
     """
     all_embeddings = {}
     with open(embed_path, 'r', encoding='utf-8') as f:
         reader = csv.reader(f)
         # Attempt to skip header if present
         header = next(reader, None)
-        for row_vals in reader:
+        for row_vals in tqdm(reader, desc="Reading all embeddings (once)"):
             if len(row_vals) < 2:
                 continue
             row_node_id = int(row_vals[0])
@@ -115,36 +117,34 @@ def load_all_embeddings(embed_path, embedding_dim):
 
 def load_all_edges(edges_path):
     """
-    Reads edges.csv (columns: source, target, attributes)
-      'attributes' is a JSON-like string, e.g. {"edge_type": "foo"}
-    Returns a list of (source, target, edge_type)
+    Reads ALL edges.csv once into a list of (src, dst, edge_type).
+      edges.csv columns: source, target, attributes
+         'attributes' is a JSON-like string, e.g. {"edge_type": "xyz"}
+    Returns:
+      edges_list = [ (src, dst, e_type), ... ]
     """
     edges_list = []
     with open(edges_path, 'r', encoding='utf-8') as f:
         reader = csv.DictReader(f)
-        for row in reader:
+        for row in tqdm(reader, desc="Reading edges (once)"):
             src = int(row['source'])
             dst = int(row['target'])
             attr_dict = ast.literal_eval(row['attributes'])
             e_type = attr_dict.get('edge_type', 'unknown')
             edges_list.append((src, dst, e_type))
-    print('edges read')
     return edges_list
 
 ###############################################################################
-# 4) COMPUTE USER DEGREES & SPLIT LOGIC
+# 4) DEGREE-BASED SPLITTING INTO TEST1, TEST2, TEST3, TEST4
 ###############################################################################
 def compute_user_degrees_for_benign_sybil_users(edges_list, node_type_map, labels_map):
     """
-    For each user node labeled benign/sybil:
-      - total_degree (#neighbors of any type)
-      - user_deg (# of user neighbors)
-      - tweet_deg (# of tweet neighbors)
+    For each user node labeled benign/sybil, compute:
+      - total_degree
+      - user_deg (# of neighbors that are 'user')
+      - tweet_deg (# of neighbors that are 'tweet')
     Returns:
-      user_ids (list of user nodes),
-      deg_map       : { u -> total_degree },
-      user_deg_map  : { u -> # user neighbors },
-      tweet_deg_map : { u -> # tweet neighbors }
+      (user_ids, deg_map, user_deg_map, tweet_deg_map)
     """
     valid_user_nodes = set()
     for nid, lab in labels_map.items():
@@ -155,12 +155,11 @@ def compute_user_degrees_for_benign_sybil_users(edges_list, node_type_map, label
     user_deg_map = defaultdict(int)
     tweet_deg_map = defaultdict(int)
 
-    # Count degrees only for these user nodes
     for (src, dst, e_type) in edges_list:
         src_type = node_type_map[src]
         dst_type = node_type_map[dst]
 
-        # If src is a valid user:
+        # If src is a valid user
         if src in valid_user_nodes:
             deg_map[src] += 1
             if dst_type == 'user':
@@ -168,7 +167,7 @@ def compute_user_degrees_for_benign_sybil_users(edges_list, node_type_map, label
             elif dst_type == 'tweet':
                 tweet_deg_map[src] += 1
 
-        # If dst is a valid user:
+        # If dst is a valid user
         if dst in valid_user_nodes:
             deg_map[dst] += 1
             if src_type == 'user':
@@ -182,7 +181,12 @@ def compute_user_degrees_for_benign_sybil_users(edges_list, node_type_map, label
         user_deg_map.setdefault(u, 0)
         tweet_deg_map.setdefault(u, 0)
 
-    return list(valid_user_nodes), dict(deg_map), dict(user_deg_map), dict(tweet_deg_map)
+    return (
+        list(valid_user_nodes),
+        dict(deg_map),
+        dict(user_deg_map),
+        dict(tweet_deg_map),
+    )
 
 def split_into_4_test_sets(
     user_ids,
@@ -196,20 +200,16 @@ def split_into_4_test_sets(
     save_dir='.'
 ):
     """
-    Splits the user_ids into:
+    Splits user_ids into:
       test1: 100 nodes with least user_deg
       test2: 100 nodes with least tweet_deg
-      test3: 100 nodes with least (user_deg + tweet_deg)
-      test4: 40% (test4_ratio) of the REMAINING + test1 + test2 + test3
+      test3: 100 nodes with least (user_deg+tweet_deg)
+      test4: 40% of REMAINING + test1 + test2 + test3
       train: everything else
 
-    If the files (testset1.txt, testset2.txt, testset3.txt, testset4.txt, trainset.txt)
-    already exist in save_dir from a previous run, we just read them.
-    Otherwise, we compute them anew and save them.
-    Returns (test1, test2, test3, test4, train) as sets of node IDs.
+    Writes these sets to disk if not already present; otherwise loads them.
+    Returns (test1, test2, test3, test4, train_set).
     """
-
-    # Filenames
     f_test1 = os.path.join(save_dir, 'testset1.txt')
     f_test2 = os.path.join(save_dir, 'testset2.txt')
     f_test3 = os.path.join(save_dir, 'testset3.txt')
@@ -223,57 +223,54 @@ def split_into_4_test_sets(
         test2 = set(_read_ids(f_test2))
         test3 = set(_read_ids(f_test3))
         test4 = set(_read_ids(f_test4))
-        train = set(_read_ids(f_train))
-        return test1, test2, test3, test4, train
+        train_set = set(_read_ids(f_train))
+        return test1, test2, test3, test4, train_set
 
     print("Creating new test/train splits...")
     set_random_seeds(seed)
 
-    # Filter only benign/sybil from user_ids
+    # Only user nodes that are labeled benign/sybil
     candidate_nodes = []
     for uid in user_ids:
-        lab = labels_map.get(uid, None)
+        lab = labels_map.get(uid)
         if lab in ['benign', 'sybil']:
             candidate_nodes.append(uid)
 
-    # 1) test1: 100 least user_deg
+    # test1: 100 least user_deg
     test1_sorted = sorted(candidate_nodes, key=lambda x: user_deg_map.get(x, 0))
     test1 = set(test1_sorted[:test_size_each])
 
-    # 2) test2: 100 least tweet_deg
+    # test2: 100 least tweet_deg
     test2_sorted = sorted(candidate_nodes, key=lambda x: tweet_deg_map.get(x, 0))
     test2 = set(test2_sorted[:test_size_each])
 
-    # 3) test3: 100 least (user_deg + tweet_deg)
+    # test3: 100 least (user_deg + tweet_deg)
     test3_sorted = sorted(candidate_nodes, key=lambda x: (user_deg_map[x] + tweet_deg_map[x]))
     test3 = set(test3_sorted[:test_size_each])
 
     combined_123 = test1.union(test2).union(test3)
 
-    # 4) test4: 40% of REMAIN (random) + test1, test2, test3
+    # test4: 40% of the remain + test1+test2+test3
     remain = [u for u in candidate_nodes if u not in combined_123]
     random.shuffle(remain)
     test4_size = int(len(remain) * test4_ratio)
     test4_part = remain[:test4_size]
     test4 = set(test4_part).union(combined_123)
 
-    train = set(candidate_nodes) - test4
+    train_set = set(candidate_nodes) - test4
 
     # Write to disk
     _write_ids(f_test1, test1)
     _write_ids(f_test2, test2)
     _write_ids(f_test3, test3)
     _write_ids(f_test4, test4)
-    _write_ids(f_train, train)
+    _write_ids(f_train, train_set)
 
-    return test1, test2, test3, test4, train
+    return test1, test2, test3, test4, train_set
 
-###############################################################################
-# 5) PRINT DATASET STATS
-###############################################################################
 def print_dataset_stats(name, node_ids, deg_map, user_deg_map, tweet_deg_map):
     """
-    Print average degree, user-degree, tweet-degree for the given node_ids set.
+    Print average degree, user-degree, tweet-degree for the given set of node_ids.
     """
     if not node_ids:
         print(f"[{name}] is empty.")
@@ -289,20 +286,25 @@ def print_dataset_stats(name, node_ids, deg_map, user_deg_map, tweet_deg_map):
     )
 
 ###############################################################################
-# 6) CHUNKER & SUBGRAPH BUILDING
+# 5) CHUNKER (in-memory)
 ###############################################################################
 def chunk_edges_in_memory(edges_list, chunk_size=100000):
     """
-    Yields sublists (chunks) of edges_list, each up to `chunk_size`.
+    Given a list of edges in memory, yield smaller chunks.
     """
     for i in range(0, len(edges_list), chunk_size):
         yield edges_list[i:i + chunk_size]
 
+###############################################################################
+# 6) BUILD SUBGRAPH
+###############################################################################
 def build_subgraph(chunk_edges, node_type_map):
     """
-    From a list of edges, build:
-      edge_dict = {(src_type, e_type, dst_type): [(src, dst), ...], ...}
-      unique_nodes = set of all node IDs
+    chunk_edges: list of (src, dst, e_type)
+    node_type_map: {node_id -> node_type}
+    Returns:
+      edge_dict = { (stype,e_type,dtype) : [(src_id, dst_id), ...], ... }
+      unique_nodes = set of node_ids in this chunk
     """
     edge_dict = defaultdict(list)
     unique_nodes = set()
@@ -316,16 +318,18 @@ def build_subgraph(chunk_edges, node_type_map):
 
 def build_hetero_data(x_dict, edge_dict):
     """
-    Convert (x_dict, edge_dict) into a PyG HeteroData object.
+    Converts (x_dict, edge_dict) into a PyG HeteroData object.
+      x_dict: { node_type: FloatTensor [num_nodes, in_dim] }
+      edge_dict: { (src_type,e_type,dst_type): [(src_idx, dst_idx), ...], ... }
     """
     from torch_geometric.data import HeteroData
     data = HeteroData()
-    # Node features
+    # 1) Node features
     for node_type, x_tensor in x_dict.items():
         data[node_type].x = x_tensor
-    # Edges
+    # 2) Edges
     for (src_type, e_type, dst_type), edges in edge_dict.items():
-        if edges:
+        if len(edges) > 0:
             src, dst = zip(*edges)
         else:
             src, dst = [], []
@@ -335,62 +339,26 @@ def build_hetero_data(x_dict, edge_dict):
     return data
 
 ###############################################################################
-# 7) MULTI-LAYER HETERO GAT
+# 7) SIMPLE HETERO GAT (PyG)
 ###############################################################################
-class MultiLayerHeteroGATPyG(nn.Module):
+class SimpleHeteroGATPyG(nn.Module):
     """
-    A multi-layer heterogeneous multi-head GAT using PyTorch Geometric.
-
-    It preserves your original input format:
-      - x_dict : { node_type: [num_nodes_of_type, in_dim] }
-      - edge_dict : { (src_type, e_type, dst_type): [(src_idx, dst_idx), ...], ... }
-
-    Internally:
-      1) Builds a PyG HeteroData object from x_dict and edge_dict.
-      2) Projects each node_type's features to hidden_dim (via self.proj).
-      3) Stacks multiple HeteroConv layers (each with GATConv for each edge type).
-      4) ELU activation after each layer.
-      5) Final output layer for 'user' node type (if present).
-
-    Typical usage:
-      model = MultiLayerHeteroGATPyG(in_dim=16, hidden_dim=32, out_dim=8, num_heads=4, num_layers=4)
-      out_dict = model(x_dict, edge_dict)
+    A refactored heterogeneous multi-head GAT using PyTorch Geometric.
     """
-
-    def __init__(self, in_dim, hidden_dim, out_dim, num_heads=4, num_layers=4):
+    def __init__(self, in_dim, hidden_dim, out_dim, num_heads=4):
         super().__init__()
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-        print(f'[MultiLayerHeteroGATPyG] Using device: {self.device}')
+        logging.info(f'[SimpleHeteroGATPyG] Using device: {self.device}')
+        print(f'[SimpleHeteroGATPyG] Using device: {self.device}')  # also print to console
 
         self.in_dim = in_dim
         self.hidden_dim = hidden_dim
         self.out_dim = out_dim
         self.num_heads = num_heads
-        self.num_layers = num_layers
 
-        # Projection from in_dim -> hidden_dim
         self.proj = nn.Linear(in_dim, hidden_dim)
-
-        # Build HeteroConv layers dynamically
-        self.layers = nn.ModuleList()
-        for layer_idx in range(num_layers):
-            conv_dict = {}
-            for edge_type in []:  # Will be dynamically defined in forward
-                conv_dict[edge_type] = GATConv(
-                    in_channels=hidden_dim * (num_heads if layer_idx > 0 else 1),
-                    out_channels=hidden_dim,
-                    heads=num_heads,
-                    concat=True,  # Output dimension is hidden_dim * num_heads
-                    negative_slope=0.2,
-                    dropout=0.0,
-                    add_self_loops=False
-                )
-            self.layers.append(HeteroConv(conv_dict, aggr='sum').to(self.device))
-
-        # Final layer for the 'user' node type
+        self.hetero_conv = None  # Will build in forward() if needed
         self.out_layer = nn.Linear(hidden_dim * num_heads, out_dim)
-
-        # Optional: init weights
         self._init_weights()
 
     def _init_weights(self):
@@ -400,137 +368,63 @@ class MultiLayerHeteroGATPyG(nn.Module):
         nn.init.zeros_(self.out_layer.bias)
 
     def forward(self, x_dict, edge_dict):
-        """
-        Parameters
-        ----------
-        x_dict : dict
-            { node_type: FloatTensor [num_nodes, in_dim] }
-        edge_dict : dict
-            { (src_type, e_type, dst_type): [(src_idx, dst_idx), ...], ... }
+        data = build_hetero_data(x_dict, edge_dict).to(self.device)
 
-        Returns
-        -------
-        out_dict : dict
-            { node_type: updated node features }
-            If 'user' is in out_dict, it will have shape [num_user_nodes, out_dim].
-            Otherwise, node types have shape [num_nodes, hidden_dim * num_heads].
-        """
-        # 1) Build HeteroData
-        data = build_hetero_data(x_dict, edge_dict)
-        data = data.to(self.device)  # move everything to device
-
-        # 2) Project each node type from in_dim -> hidden_dim
+        # Project each node_type
         for node_type in data.node_types:
-            x_in = data[node_type].x  # [num_nodes, in_dim]
+            x_in = data[node_type].x
             data[node_type].x = self.proj(x_in)  # [num_nodes, hidden_dim]
 
-        # 3) Forward pass through each HeteroConv layer
-        x_dict = {ntype: data[ntype].x for ntype in data.node_types}
-        edge_index_dict = {etype: data[etype].edge_index for etype in data.edge_types}
+        # Build HeteroConv if not done yet
+        if self.hetero_conv is None:
+            conv_dict = {}
+            for edge_type in data.edge_types:
+                conv_dict[edge_type] = GATConv(
+                    in_channels=self.hidden_dim,
+                    out_channels=self.hidden_dim,
+                    heads=self.num_heads,
+                    concat=True,
+                    negative_slope=0.2,
+                    dropout=0.0,
+                    add_self_loops=False
+                )
+            self.hetero_conv = HeteroConv(conv_dict, aggr='sum').to(self.device)
 
-        for layer in self.layers:
-            # Dynamically assign GATConv modules if not yet initialized
-            if not layer.convs:
-                for edge_type in edge_index_dict.keys():
-                    layer.convs[edge_type] = GATConv(
-                        in_channels=x_dict[edge_type[0]].shape[1],
-                        out_channels=self.hidden_dim,
-                        heads=self.num_heads,
-                        concat=True,
-                        negative_slope=0.2,
-                        dropout=0.0,
-                        add_self_loops=False
-                    ).to(self.device)
-
-            # Forward pass through the current layer
-            x_dict = layer(x_dict, edge_index_dict)
-            x_dict = {ntype: F.elu(x) for ntype, x in x_dict.items()}
-
-        # 4) Final output layer for 'user' node type
-        if 'user' in x_dict:
-            x_dict['user'] = self.out_layer(x_dict['user'])
-
-        return x_dict
-
-    
-
-    def forward(self, x_dict, edge_dict):
-        """
-        Parameters
-        ----------
-        x_dict : dict
-            { node_type: FloatTensor [num_nodes, in_dim] }
-        edge_dict : dict
-            { (src_type, e_type, dst_type): [(src_idx, dst_idx), ...], ... }
-
-        Returns
-        -------
-        out_dict : dict
-            { node_type: updated node features }
-            If 'user' is in out_dict, it will have shape [num_user_nodes, out_dim].
-            Otherwise, node types have shape [num_nodes, hidden_dim * num_heads].
-        """
-        # 1) Build HeteroData
-        data = build_hetero_data(x_dict, edge_dict)
-        data = data.to(self.device)  # move everything to device
-
-        # 2) Project each node type from in_dim -> hidden_dim
-        for node_type in data.node_types:
-            x_in = data[node_type].x  # [num_nodes, in_dim]
-            data[node_type].x = self.proj(x_in)  # [num_nodes, hidden_dim]
-
-        # 3) Forward pass through each HeteroConv layer
-        x_dict = {ntype: data[ntype].x for ntype in data.node_types}
-        edge_index_dict = {etype: data[etype].edge_index for etype in data.edge_types}
-
-        for layer_idx, layer in enumerate(self.layers):
-            # Dynamically assign GATConv modules if not yet initialized
-            if not layer.convs:
-                for edge_type in edge_index_dict.keys():
-                    layer.convs[edge_type] = GATConv(
-                        in_channels=x_dict[edge_type[0]].shape[1],
-                        out_channels=self.hidden_dim,
-                        heads=self.num_heads,
-                        concat=True,
-                        negative_slope=0.2,
-                        dropout=0.0,
-                        add_self_loops=False
-                    ).to(self.device)
-
-            # Forward pass through the current layer
-            x_dict = layer(x_dict, edge_index_dict)
-            x_dict = {ntype: F.elu(x) for ntype, x in x_dict.items()}
-
-        # 4) Final output layer for 'user' node type
-        if 'user' in x_dict:
-            x_dict['user'] = self.out_layer(x_dict['user'])
-
-        return x_dict
+        out_feats = self.hetero_conv(
+            x_dict={ntype: data[ntype].x for ntype in data.node_types},
+            edge_index_dict={etype: data[etype].edge_index for etype in data.edge_types}
+        )
+        # Apply ELU
+        for ntype in out_feats:
+            out_feats[ntype] = F.elu(out_feats[ntype])
+        # If 'user' is present, apply the final out_layer
+        if 'user' in out_feats:
+            out_feats['user'] = self.out_layer(out_feats['user'])
+        return out_feats
 
 ###############################################################################
 # 8) METRICS
 ###############################################################################
 def compute_metrics(logits, labels_t, loss_fn):
     """
-    logits : Tensor [N, 2] for binary classification
-    labels_t: Tensor [N] with {0,1}
-    Returns { 'loss', 'acc', 'auc' }
+    logits: Tensor [N, 2], for binary classification
+    labels_t: Tensor [N], with values {0,1}
+    Returns: dict with 'loss', 'acc', 'auc'
     """
     loss_val = loss_fn(logits, labels_t).item()
     preds = torch.argmax(logits, dim=1)
     acc_val = accuracy_score(labels_t.cpu().numpy(), preds.cpu().numpy())
-    # For AUC, we need the probability of the positive class (index=1)
     probs = torch.softmax(logits, dim=1)[:, 1].detach().cpu().numpy()
-    # If the test set has only one class, roc_auc_score can fail => fallback
-    labels_np = labels_t.cpu().numpy()
-    if len(set(labels_np)) > 1:
-        auc_val = roc_auc_score(labels_np, probs)
+    # If only one class is present, roc_auc_score can fail. Fallback => 0.5
+    unique_lbls = set(labels_t.cpu().numpy())
+    if len(unique_lbls) > 1:
+        auc_val = roc_auc_score(labels_t.cpu().numpy(), probs)
     else:
         auc_val = 0.5
     return {'loss': loss_val, 'acc': acc_val, 'auc': auc_val}
 
 ###############################################################################
-# 9) TRAINING LOOP (CHUNKED)
+# 9) TRAIN IN CHUNKS, EVALUATE ON TEST1/TEST2/TEST3/TEST4
 ###############################################################################
 def train_in_chunks(
     node_info_path,
@@ -539,37 +433,32 @@ def train_in_chunks(
     edges_path,
     embedding_dim=32,
     chunk_size=10000,
-    num_epochs=2,
-    seed=42,
+    num_epochs=1,
     test_size_each=100,
-    test4_ratio=0.4
+    test4_ratio=0.4,
+    seed=42
 ):
     """
     Main function that:
-      1. Loads node types, labels, embeddings, edges
-      2. Splits user nodes into test1, test2, test3, test4, and train
-      3. Prints stats
-      4. Builds multi-layer GAT model
-      5. For each epoch:
-         - Chunks edges => build subgraph => forward => train (if in train set)
-         - Compute metrics for each test set => accumulate => log
-      6. Saves checkpoint
+      - Loads node types, labels, embeddings, edges (once).
+      - Splits user nodes with sybil/benign into test1, test2, test3, test4, and train.
+      - Builds subgraph per chunk and trains a Hetero GAT.
+      - Prints/logs test metrics (for each test set) each epoch.
     """
-    # 1) Seeds
+    # 1) Set seeds
     set_random_seeds(seed)
 
-    # 2) Device & Logging
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     logging.info(f"Running on device: {device}")
     print(f"Running on device: {device}")
 
-    # 3) Load all CSV data
+    # 2) LOAD EVERYTHING (ONCE)
     node_type_map = build_node_type_map(node_info_path)
     labels_map = load_labels(node_labels_path)
     all_embeddings = load_all_embeddings(embed_path, embedding_dim)
     edges_list = load_all_edges(edges_path)
 
-    # 4) Compute user degrees => split => test1, test2, test3, test4, train
+    # 3) Compute degrees => split => test1, test2, test3, test4, train_set
     user_ids, deg_map, user_deg_map, tweet_deg_map = compute_user_degrees_for_benign_sybil_users(
         edges_list, node_type_map, labels_map
     )
@@ -583,39 +472,38 @@ def train_in_chunks(
         test_size_each= test_size_each,
         test4_ratio   = test4_ratio,
         seed          = seed,
-        save_dir      = "."
+        save_dir      = '.'
     )
 
-    # Print stats
-    print_dataset_stats("train", train_set, deg_map, user_deg_map, tweet_deg_map)
-    print_dataset_stats("test1", test1, deg_map, user_deg_map, tweet_deg_map)
-    print_dataset_stats("test2", test2, deg_map, user_deg_map, tweet_deg_map)
-    print_dataset_stats("test3", test3, deg_map, user_deg_map, tweet_deg_map)
-    print_dataset_stats("test4", test4, deg_map, user_deg_map, tweet_deg_map)
+    # (Optional) Print stats about each set
+    print_dataset_stats("train",  train_set, deg_map, user_deg_map, tweet_deg_map)
+    print_dataset_stats("test1",  test1,     deg_map, user_deg_map, tweet_deg_map)
+    print_dataset_stats("test2",  test2,     deg_map, user_deg_map, tweet_deg_map)
+    print_dataset_stats("test3",  test3,     deg_map, user_deg_map, tweet_deg_map)
+    print_dataset_stats("test4",  test4,     deg_map, user_deg_map, tweet_deg_map)
     all_test = test1.union(test2).union(test3).union(test4)
     print_dataset_stats("all_test", all_test, deg_map, user_deg_map, tweet_deg_map)
 
-    # 5) Create the multi-layer GAT model
+    # 4) CREATE MODEL
     num_classes = 2  # sybil=1, benign=0
-    model = MultiLayerHeteroGATPyG(
+    model = SimpleHeteroGATPyG(
         in_dim=embedding_dim,
         hidden_dim=64,
         out_dim=num_classes,
-        num_heads=4,    # # of attention heads
-        num_layers=4    # 4 hidden layers
+        num_heads=4
     ).to(device)
 
     optimizer = torch.optim.Adam(model.parameters(), lr=0.01)
     loss_fn = nn.CrossEntropyLoss()
 
-    # 6) Training epochs
+    # 5) TRAIN LOOP
     for epoch in range(num_epochs):
         logging.info(f"\n=== Epoch {epoch+1}/{num_epochs} ===")
         print(f"\n=== Epoch {epoch+1}/{num_epochs} ===")
 
         epoch_train_loss = 0.0
 
-        # We'll track metrics for each test set across batches
+        # We'll track metrics for each test set across the chunked training
         test_metrics_dict = {
             'test1': {'loss': 0.0, 'acc': 0.0, 'auc': 0.0, 'count': 0},
             'test2': {'loss': 0.0, 'acc': 0.0, 'auc': 0.0, 'count': 0},
@@ -623,13 +511,14 @@ def train_in_chunks(
             'test4': {'loss': 0.0, 'acc': 0.0, 'auc': 0.0, 'count': 0},
         }
 
-        # Process edges in chunks
+        # We'll chunk edges in memory
         edge_chunks = chunk_edges_in_memory(edges_list, chunk_size=chunk_size)
+
         for batch_i, chunk_edges_ in enumerate(edge_chunks, start=1):
-            # Build subgraph
+            # 1) Build subgraph
             edge_dict, unique_nodes = build_subgraph(chunk_edges_, node_type_map)
 
-            # Build x_dict
+            # 2) Group by node_type & build x_dict
             node_lists = defaultdict(list)
             for gid in unique_nodes:
                 ntype = node_type_map[gid]
@@ -643,6 +532,7 @@ def train_in_chunks(
                 g_to_local = {g: i for i, g in enumerate(g_list)}
                 local_id_map[ntype] = g_to_local
 
+                # Gather embeddings from our in-memory dictionary
                 arr_size = (len(g_list), embedding_dim)
                 big_np = np.zeros(arr_size, dtype=np.float32)
                 for i, g in enumerate(g_list):
@@ -650,25 +540,28 @@ def train_in_chunks(
                         big_np[i] = all_embeddings[g]
                 x_dict[ntype] = torch.from_numpy(big_np).to(device)
 
-            # Convert edges to local indices
+            # 3) Convert edges to local indices
             local_edge_dict = defaultdict(list)
             for (src_t, e_type, dst_t), e_list in edge_dict.items():
                 s_map = local_id_map[src_t]
                 d_map = local_id_map[dst_t]
                 for (src, dst) in e_list:
                     if src in s_map and dst in d_map:
-                        local_edge_dict[(src_t, e_type, dst_t)].append((s_map[src], d_map[dst]))
+                        s_local = s_map[src]
+                        d_local = d_map[dst]
+                        local_edge_dict[(src_t, e_type, dst_t)].append((s_local, d_local))
 
             # Forward pass
             out_dict = model(x_dict, local_edge_dict)
 
-            # Train on user nodes that are in train_set
+            # 4) Compute loss on train user nodes
             loss = torch.tensor(0.0, device=device)
             num_labeled_train = 0
             if 'user' in node_lists:
                 user_out = out_dict['user']
                 user_map = local_id_map['user']
 
+                # Gather train user indices
                 train_indices, train_labels = [], []
                 for g in node_lists['user']:
                     if g in train_set and g in labels_map:
@@ -680,6 +573,7 @@ def train_in_chunks(
                             train_indices.append(user_map[g])
                             train_labels.append(0)
 
+                # Train loss
                 if train_indices:
                     train_idx_t = torch.tensor(train_indices, dtype=torch.long, device=device)
                     train_lbl_t = torch.tensor(train_labels, dtype=torch.long, device=device)
@@ -687,19 +581,7 @@ def train_in_chunks(
                     loss = loss_fn(logits_train, train_lbl_t)
                     num_labeled_train = len(train_indices)
 
-            # Backprop
-            if num_labeled_train > 0:
-                optimizer.zero_grad()
-                loss.backward()
-                optimizer.step()
-
-            epoch_train_loss += loss.item()
-
-            # Evaluate on test sets
-            if 'user' in node_lists:
-                user_out = out_dict['user']
-                user_map = local_id_map['user']
-
+                # Evaluate on each test set
                 def evaluate_testset(test_nodes, set_key):
                     idxs, lbls = [], []
                     for g in node_lists['user']:
@@ -727,15 +609,23 @@ def train_in_chunks(
                 evaluate_testset(test3, 'test3')
                 evaluate_testset(test4, 'test4')
 
+            # 5) Backprop if we have labeled data
+            if num_labeled_train > 0:
+                optimizer.zero_grad()
+                loss.backward()
+                optimizer.step()
+
+            epoch_train_loss += loss.item()
+
             msg = (f"  Batch {batch_i}: edges={len(chunk_edges_)}, "
                    f"train_users={num_labeled_train}, loss={loss.item():.4f}")
             logging.info(msg)
-            #print(msg)
+            print(msg)
 
-        # End of epoch => average metrics
+        # End of epoch => average train loss
         avg_train_loss = epoch_train_loss / max(batch_i, 1)
 
-        # For each test set, average across all batches that had test samples
+        # Average test metrics across all batches that had test samples
         results_str = []
         for k in ['test1', 'test2', 'test3', 'test4']:
             c = test_metrics_dict[k]['count']
@@ -754,7 +644,7 @@ def train_in_chunks(
         logging.info(msg_epoch)
         print(msg_epoch)
 
-        # Optionally save model checkpoint each epoch
+        # optionally save model checkpoint each epoch
         torch.save(model.state_dict(), "training_time_hetero_gnn_model.pth")
 
     return model
@@ -763,16 +653,15 @@ def train_in_chunks(
 # 10) MAIN
 ###############################################################################
 if __name__ == "__main__":
-    # Example paths: adjust these based on your environment
     node_info_path   = "node_information.csv"
     node_labels_path = "node_labels.csv"
     embed_path       = "node_embeddings.csv"
     edges_path       = "edges.csv"
 
-    # Hyperparameters
-    chunk_size = 100000
+    # Adjust as needed
+    chunk_size = 1000000
     num_epochs = 20
-    embedding_dim = 32  # must match your embedding file dimension
+    embedding_dim = 32  # must match your embedding dimension
 
     trained_model = train_in_chunks(
         node_info_path=node_info_path,
@@ -782,23 +671,22 @@ if __name__ == "__main__":
         embedding_dim=embedding_dim,
         chunk_size=chunk_size,
         num_epochs=num_epochs,
-        seed=42,
-        test_size_each=100,   # test1/test2/test3 => 100 each
-        test4_ratio=0.4       # 40% of remaining go into test4
+        seed=42,         
+        test_size_each=100,  # how many go into test1/test2/test3
+        test4_ratio=0.4      # fraction of remainder that goes into test4
     )
 
-    # Save final model checkpoint with metadata
     checkpoint = {
         'state_dict': trained_model.state_dict(),
         'metadata': {
             'trained_time': datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-            'description': '4-layer Hetero-GAT model with extended metadata.',
+            'description': 'Hetero-GNN model with extended metadata (4 test splits).',
             'num_epochs': num_epochs,
             'chunk_size': chunk_size
         }
     }
-    timestamp = datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
-    filename = f"hetero_gnn_model_{timestamp}.pth"
+    final_ts = datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
+    filename = f"hetero_gnn_model_{final_ts}.pth"
     torch.save(checkpoint, filename)
     logging.info(f"Final model saved to {filename}")
     print(f"Final model saved to {filename}")
