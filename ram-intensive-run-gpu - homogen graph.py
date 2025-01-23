@@ -592,9 +592,9 @@ def train_in_chunks(
 # 10) MAIN
 ###############################################################################
 if __name__ == "__main__":
-    node_labels_path = "node_labels.csv"
-    embed_path       = "new_embeddings_none_kg.csv"   # <--- CHANGED HERE
-    edges_path       = "sorted_edges.csv"
+    node_labels_path = "user_labels.csv"
+    embed_path       = "user_embeddings.csv"   # <--- CHANGED HERE
+    edges_path       = "user_edges.csv"
 
     chunk_size = 100000
     num_epochs = 100
