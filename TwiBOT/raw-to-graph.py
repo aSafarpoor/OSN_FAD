@@ -35,7 +35,7 @@ def write_pickle(variable,name):
 ##############################################
 ## Part 1: Removing nodes without tweet or without neighbor: output: 11309 nodes
 ##############################################
-
+'''
 def preprocess_text(text: str) -> str:
     """
     Preprocess text by:
@@ -350,6 +350,7 @@ write_pickle(variable=keywords_embedding,name='keywords_embedding.pkl')
 ##############################################
 ## Part 4: creat H-Graph
 ##############################################
+
 nodes = read_pickle('nodeids.pkl')
 set_of_nodes = set(nodes)
 all_keywords = read_pickle('all_keywords.pkl')
@@ -375,20 +376,18 @@ nodeid_embedding = read_pickle('nodeid_embedding.pkl')
 G = nx.DiGraph()  
 for node in tqdm(nodes):
     G.add_node(node, label=nodeid_labels[node], type="u", node_class=nodeid_class[node], embedding=nodeid_embedding[node][:])
-del nodeid_embedding
+
 print('user nodes added')
 
 for node in tqdm(all_keywords):
     G.add_node(node, label=-1, type="k", node_class="support", embedding=keywords_embedding[node][:])
-del keywords_embedding
-del all_keywords
+
 print('keyword nodes added')
 
 all_tweets = list(tweetid_embedding.keys())
 for node in tqdm(all_tweets):
     G.add_node(node, label=-1, type="t", node_class="support", embedding=tweetid_embedding[node][:])
-del tweetid_embedding
-del all_tweets
+
 print('tweet nodes added')
 
 print('adding edges started')
@@ -411,7 +410,7 @@ for node in tqdm(nodes):
             G.add_edge(node, node2, type="fg")
 
 
-    tweets = [nodeid_tweetid[node]] 
+    tweets = nodeid_tweetid[node]
     for tweet in tweets:
         G.add_edge(node, tweet, type="ut")
         G.add_edge(tweet, node, type="tu")
@@ -421,18 +420,19 @@ for node in tqdm(nodes):
         for keyword in keywords:
             G.add_edge(tweet, keyword, type="tk")
             G.add_edge(keyword, tweet, type="kt")
-            
+
+print(f"Number of nodes: {G.number_of_nodes()}")
+print(f"Number of edges: {G.number_of_edges()}")
+
+
 write_pickle(variable=G,name='G1.pkl')
 print('initial graph created')
 
-del all_keywords
-del nodeid_tweetid
-del tweetid_keywords
-del edges_nodeid_nodeid
-del G
+'''
 
 G = read_pickle(name='G1.pkl')
-mapping = {old_name: new_name for new_name, old_name in enumerate(G.nodes())}
+print("read")
+mapping = {old_name: new_name for new_name, old_name in tqdm(enumerate(G.nodes()))}
 G = nx.relabel_nodes(G, mapping)
 print("relabelled")
 write_pickle(variable=G,name='G2.pkl')
@@ -441,17 +441,20 @@ write_pickle(variable=G,name='G2.pkl')
 ####### just some statistics#######
 ###################################
 
+G = read_pickle(name='G2.pkl')
+
+# Some Statistics
 print("computing statistics")
 node_stats = {}
 for node, data in G.nodes(data=True):
     node_type = data.get('type', 'Unknown')
     if node_type not in node_stats:
-        node_stats[node_type] = {'count': 0, 'classes': {}, 'labels': []}
+        node_stats[node_type] = {'count': 0, 'classes': {}, 'labels': set()}
     
     node_stats[node_type]['count'] += 1
     node_class = data.get('node_class', 'Unknown')
     node_stats[node_type]['classes'][node_class] = node_stats[node_type]['classes'].get(node_class, 0) + 1
-    node_stats[node_type]['labels'].append(data.get('label', 'Unknown'))
+    node_stats[node_type]['labels'].add(data.get('label', 'Unknown'))  # Use a set for unique labels
 
 # Compute average degree for different types of nodes
 avg_degrees = {}
@@ -476,7 +479,7 @@ for node_type, stats in node_stats.items():
     print(f"Type: {node_type}")
     print(f"  Count: {stats['count']}")
     print(f"  Classes: {stats['classes']}")
-    print(f"  Labels: {stats['labels']}")
+    print(f"  Labels: {stats['labels']}")  # Convert set to sorted list for display
     print(f"  Avg Degree: {avg_degrees[node_type]:.2f}")
 
 print("\nEdge Statistics:")
@@ -484,3 +487,190 @@ for edge_type, count in edge_stats.items():
     print(f"Type: {edge_type}, Count: {count}")
 
 
+
+'''
+Input: G2.pkl
+outputs:
+### for Homogenous G
+"user_labels.csv"
+"user_embeddings.csv"   
+"user_edges.csv"
+
+### for heterogenous G
+"node_information.csv"
+"node_labels.csv"
+"node_embeddings.csv"
+"edges.csv"
+
+train_set.txt
+test_set.txt
+
+'''
+
+import csv
+import numpy as np
+from tqdm import tqdm
+import pickle
+import random
+SEED = 1
+random.seed(SEED)
+import networkx as nx
+
+def read_pickle(name):
+    with open(name,'rb') as f:
+        temp = pickle.load(f)
+    return temp
+
+def write_pickle(variable,name):
+    with open(name , 'wb') as f:
+        pickle.dump(variable, f)
+
+# node_types : 'u','t','k'
+# edge_types: 'fr','fg','ut','tu','tk','kt'
+# node_classes: 'test','dev','train',"support"
+
+# node_id,label
+# node_id,old_id,attributes
+# 0,fcolomboil,{'node_type': 'keyword'}
+
+
+# source,target,attributes
+# 3624719,3728235,"{""edge_type"": ""user_to_user""}"
+
+
+###################################################################################
+###############change files for input of learning codes############################
+###################################################################################
+
+
+G = read_pickle(name='G2.pkl')
+
+usernodes = []
+allnodes = []
+nodeinformation = {}
+nodelabel = {}
+trainset = []
+testset = []
+nodeembedding = {}
+userembedding = {}
+
+alledges = []
+useredges = []
+
+
+
+
+for node, data in tqdm(G.nodes(data=True)):
+    node_type = data.get('type', 'Unknown')
+    node_embedding = data.get('embedding', '')
+    if len(node_embedding) == 0:
+        raise ValueError("An error for no embedding") 
+
+    if node_type == 'u':
+        usernodes.append(node)
+        
+        node_type = data.get('type', -1)
+        if node_type == '1':
+            nodelabel[node] = "sybil"
+        elif node_type == '0':
+            nodelabel[node] = "benign"
+        else:
+            nodelabel[node] = "unknown"
+        
+        node_class = data.get('node_class', 'Unknown')
+        if node_class == 'train':
+            trainset.append(node)
+        elif node_class == 'test':
+            testset.append(node)    
+        userembedding[node] = node_embedding
+           
+    allnodes.append(node)
+    nodeinformation[node] = node_type
+    nodeembedding[node] = node_embedding
+
+userset = set(usernodes)
+
+
+
+for x, y, data in tqdm(G.edges(data=True)): 
+    edge_type = data.get('type', 'Unknown') #'fr','fg','ut','tu','tk','kt'
+    if edge_type == 'Unknown':
+        raise ValueError("An error: no label for edge") 
+    
+    if x in userset and y in userset:
+        useredges.append([x,y,data])
+
+    alledges.append([x,y,data])
+    
+
+        
+        
+    
+with open("user_labels.csv", "w", newline="") as f:
+    writer = csv.writer(f)
+    writer.writerow(["node_id", "label"])
+    for node, label in tqdm(nodelabel.items()):
+        writer.writerow([node, label])
+
+with open("user_embeddings.csv", "w", newline="") as f:
+    writer = csv.writer(f)
+    writer.writerow(["node_id", "embedding"])
+    for node, embedding in tqdm(userembedding.items()):
+        writer.writerow([node, embedding])
+
+with open("user_edges.csv", "w", newline="") as f:
+    writer = csv.writer(f)
+    writer.writerow(["source", "target", "attributes"])
+    for edge in tqdm(useredges):
+        writer.writerow(edge)
+
+with open("node_information.csv", "w", newline="") as f:
+    writer = csv.writer(f)
+    writer.writerow(["node_id", "attributes"])
+    for node, attributes in tqdm(nodeinformation.items()):
+        writer.writerow([node, attributes])
+
+with open("node_labels.csv", "w", newline="") as f:
+    writer = csv.writer(f)
+    writer.writerow(["node_id", "label"])
+    for node, label in tqdm(nodelabel.items()):
+        writer.writerow([node, label])
+
+with open("node_embeddings.csv", "w", newline="") as f:
+    writer = csv.writer(f)
+    writer.writerow(["node_id", "embedding"])
+    for node, embedding in tqdm(nodeembedding.items()):
+        writer.writerow([node, embedding])
+
+with open("edges.csv", "w", newline="") as f:
+    writer = csv.writer(f)
+    writer.writerow(["source", "target", "attributes"])
+    for edge in tqdm(alledges):
+        writer.writerow(edge)
+
+with open("train_set.txt", "w") as f:
+    for node in tqdm(trainset):
+        f.write(f"{node}\n")
+
+with open("test_set.txt", "w") as f:
+    for node in tqdm(testset):
+        f.write(f"{node}\n")
+
+print("Generated files:")
+print("- user_labels.csv")
+print("- user_embeddings.csv")
+print("- user_edges.csv")
+print("- node_information.csv")
+print("- node_labels.csv")
+print("- node_embeddings.csv")
+print("- edges.csv")
+print("- train_set.txt")
+print("- test_set.txt")
+
+print("\nStatistics:")
+print(f"Number of user nodes: {len(usernodes)}")
+print(f"Number of all nodes: {len(allnodes)}")
+print(f"Number of user edges: {len(useredges)}")
+print(f"Number of all edges: {len(alledges)}")
+print(f"Train set size: {len(trainset)}")
+print(f"Test set size: {len(testset)}")
