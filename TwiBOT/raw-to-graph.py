@@ -437,7 +437,10 @@ G = nx.relabel_nodes(G, mapping)
 print("relabelled")
 write_pickle(variable=G,name='G2.pkl')
 
-# Some Statistics
+###################################
+####### just some statistics#######
+###################################
+
 print("computing statistics")
 node_stats = {}
 for node, data in G.nodes(data=True):
